@@ -14,11 +14,11 @@ export HF_DATASETS_OFFLINE=1
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3"}
 GPUS=${GPUS:-4}
 model_name=${model_name:-"InternVL2_5-2B"}
-export MASTER_PORT=${MASTER_PORT:-4325}
+export MASTER_PORT=${MASTER_PORT:-4320}
 RESUME_TRAINING=${RESUME_TRAINING:-0}
 SAVE_ONLY_MODEL=${SAVE_ONLY_MODEL:-True}
 
-OUTPUT_DIR=${OUTPUT_DIR:-"/inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/project/Beta-Binomial-PRM/log/beta-${model_name}-visualprm400k"}
+OUTPUT_DIR=${OUTPUT_DIR:-"/inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/project/Beta-Binomial-PRM/log/normal-${model_name}-visualprm400k"}
 if [ ! -d "$OUTPUT_DIR" ]; then
   mkdir -p "$OUTPUT_DIR"
 fi
@@ -47,9 +47,9 @@ fi
 
 export WANDB_MODE=offline
 export WANDB_PROJECT=${WANDB_PROJECT:-"Beta-PRM"}
-export WANDB_NAME=${WANDB_NAME:-"beta-${model_name}-visualprm400k"}
+export WANDB_NAME=${WANDB_NAME:-"normal-${model_name}-visualprm400k"}
 # group: hyperparameter
-export WANDB_RUN_GROUP=${WANDB_RUN_GROUP:-"beta-${model_name}"}
+export WANDB_RUN_GROUP=${WANDB_RUN_GROUP:-"normal-${model_name}"}
 # tag: dataset
 export WANDB_TAGS=${WANDB_TAGS:-"visualprm400k"}
 export WANDB_DIR=${WANDB_DIR:-"${OUTPUT_DIR}/wandb"}
@@ -141,6 +141,7 @@ python -m torch.distributed.run \
   --lr_scheduler_type "cosine" \
   --logging_steps 100 \
   --max_seq_length 8192 \
+  --prm_loss_type normal_prm \
   --beta_binom_kappa_min ${BETA_BINOM_KAPPA_MIN} \
   --beta_binom_kappa_init ${BETA_BINOM_KAPPA_INIT} \
   --beta_binom_evi_reg ${BETA_BINOM_EVI_REG} \

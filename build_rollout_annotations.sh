@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+set -x
+
+cd /inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/project/Beta-Binomial-PRM
+
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+
+# Generator model used to sample reasoning rollouts.
+GEN_MODEL=${GEN_MODEL:-"/inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/model/InternVL2_5-8B"}
+
+# Judge server.
+JUDGE_API_BASE=${JUDGE_API_BASE:-"http://127.0.0.1:8888/v1"}
+JUDGE_MODEL=${JUDGE_MODEL:-"Qwen2.5-32B-Instruct"}
+
+# Rollout settings.
+NUM_ROLLOUTS=${NUM_ROLLOUTS:-16}
+OVERSAMPLE=${OVERSAMPLE:-2.0}
+FLUSH_EVERY=${FLUSH_EVERY:-1}
+
+# Use one GPU for rollout generation by default.
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"7"}
+
+# =========================
+# OlympiadBench: multi-image version
+# =========================
+python -m eval.build_eval_rollouts_annotation_olympiadbench \
+  --input datasets/OlympiadBench/seed_dataset.json \
+  --output datasets/OlympiadBench/OlympiadBench_rollout_annotation_InternVL8B_oversample.json \
+  --image_root datasets/OlympiadBench \
+  --generator_model "${GEN_MODEL}" \
+  --num_rollouts "${NUM_ROLLOUTS}" \
+  --judge_api_base "${JUDGE_API_BASE}" \
+  --judge_model "${JUDGE_MODEL}" \
+  --select_by_llm_quality \
+  --oversample "${OVERSAMPLE}" \
+  --flush_every "${FLUSH_EVERY}"

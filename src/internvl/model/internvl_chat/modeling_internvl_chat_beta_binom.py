@@ -142,6 +142,13 @@ class InternVLChatModel(PreTrainedModel):
             nn.LayerNorm(llm_hidden_size),
             nn.Linear(llm_hidden_size, 1),
         )
+
+        # PRM loss mode:
+        # - "beta_binom": original Beta-Binomial PRM
+        # - "normal_prm": standard PRM with soft-label Yes/No classification
+        self.prm_loss_type = getattr(config, "prm_loss_type", "beta_binom")
+        self.prm_label_type = getattr(config, "prm_label_type", "soft_ratio")
+        
         self.reset_kappa_head(self.beta_binom_kappa_init)
 
         if config.use_backbone_lora:
@@ -431,7 +438,11 @@ class InternVLChatModel(PreTrainedModel):
                     attentions=outputs.attentions,
                 )
 
-            use_beta_binom = prm_counts_k is not None and prm_counts_n is not None
+            use_beta_binom = (
+                getattr(self, "prm_loss_type", "beta_binom") == "beta_binom"
+                and prm_counts_k is not None
+                and prm_counts_n is not None
+            )
             if use_beta_binom:
                 selected_k = prm_counts_k.contiguous().view(-1)[placeholder_mask]
                 selected_n = prm_counts_n.contiguous().view(-1)[placeholder_mask]

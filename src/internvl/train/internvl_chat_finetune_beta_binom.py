@@ -264,6 +264,12 @@ class ModelArguments:
     use_liger: bool = field(
         default=False, metadata={'help': 'Set to True to use the liger kernel.'}
     )
+    prm_loss_type: str = field(
+    default="beta_binom",
+    metadata={
+        "help": "PRM loss type. Use 'beta_binom' for original BetaPRM, "
+                "or 'normal_prm' for standard PRM soft-label CE."}
+    )
 
 
 @dataclass
@@ -1533,20 +1539,36 @@ def main():
     model.prm_token_id = tokenizer.convert_tokens_to_ids(PRM_TOKEN)
     model.reward_token_ids = tokenizer.convert_tokens_to_ids(REWARD_TOKENS)
     model.img_context_token_id = img_context_token_id
+    
+    # PRM loss mode:
+    #   beta_binom  -> original Beta-Binomial PRM loss
+    #   normal_prm  -> standard PRM soft-label CE fallback loss
+    model.config.prm_loss_type = model_args.prm_loss_type
+    model.prm_loss_type = model_args.prm_loss_type
+    if dist.get_rank() == 0:
+        logger.info(f'Using PRM loss type: {model_args.prm_loss_type}')
+    
     model.beta_binom_eps = data_args.beta_binom_eps
     # Beta-binomial uncertainty head settings.
     model.beta_binom_kappa_min = data_args.beta_binom_kappa_min
     model.beta_binom_evi_reg = data_args.beta_binom_evi_reg
     model.beta_binom_kappa_init = data_args.beta_binom_kappa_init
-    if hasattr(model, 'reset_kappa_head'):
-        model.reset_kappa_head(model.beta_binom_kappa_init)
-    attach_kappa_head_grad_multiplier(
-        model, data_args.beta_binom_kappa_head_lr_mult
-    )
-    if dist.get_rank() == 0:
-        logger.info(
-            f'Using kappa_head gradient multiplier: {data_args.beta_binom_kappa_head_lr_mult}'
+    if model_args.prm_loss_type == 'beta_binom':
+        if hasattr(model, 'reset_kappa_head'):
+            model.reset_kappa_head(model.beta_binom_kappa_init)
+
+        attach_kappa_head_grad_multiplier(
+            model, data_args.beta_binom_kappa_head_lr_mult
         )
+        if dist.get_rank() == 0:
+            logger.info(
+                f'Using kappa_head gradient multiplier: {data_args.beta_binom_kappa_head_lr_mult}'
+            )
+    else:
+        if dist.get_rank() == 0:
+            logger.info(
+                'Normal PRM mode: skip kappa_head reset and kappa_head gradient multiplier.'
+            )
 
     # Backward-compatible knobs for older checkpoints.
     model.beta_binom_kappa_floor = data_args.beta_binom_kappa_floor
@@ -1715,10 +1737,14 @@ def main():
         tokenizer=tokenizer,
         data_collator=collator,
     )
-    # Ensure beta stats are injected before TensorBoard flushes logs.
-    trainer.remove_callback(transformers.integrations.TensorBoardCallback)
-    trainer.add_callback(BetaBinomStatsCallback)
-    trainer.add_callback(transformers.integrations.TensorBoardCallback)
+    if model_args.prm_loss_type == 'beta_binom':
+        # Ensure beta stats are injected before TensorBoard flushes logs.
+        trainer.remove_callback(transformers.integrations.TensorBoardCallback)
+        trainer.add_callback(BetaBinomStatsCallback)
+        trainer.add_callback(transformers.integrations.TensorBoardCallback)
+    else:
+        if dist.get_rank() == 0:
+            logger.info('Normal PRM mode: skip BetaBinomStatsCallback.')
 
     # Training
     if training_args.do_train:
