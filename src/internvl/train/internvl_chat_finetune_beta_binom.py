@@ -265,12 +265,23 @@ class ModelArguments:
         default=False, metadata={'help': 'Set to True to use the liger kernel.'}
     )
     prm_loss_type: str = field(
-    default="beta_binom",
-    metadata={
-        "help": "PRM loss type. Use 'beta_binom' for original BetaPRM, "
-                "or 'normal_prm' for standard PRM soft-label CE."}
+        default="beta_binom",
+        metadata={
+            "help": "PRM loss type: beta_binom, normal_prm, or ensemble_prm."
+        },
     )
-
+    ensemble_prm_num_heads: int = field(
+        default=8,
+        metadata={"help": "Number of ensemble reward heads for ensemble_prm."},
+    )
+    ensemble_prm_hidden_dim: int = field(
+        default=128,
+        metadata={"help": "Hidden dimension of each ensemble reward head."},
+    )
+    ensemble_prm_dropout: float = field(
+        default=0.0,
+        metadata={"help": "Dropout rate used inside ensemble reward heads."},
+    )
 
 @dataclass
 class DataTrainingArguments:
@@ -1541,12 +1552,44 @@ def main():
     model.img_context_token_id = img_context_token_id
     
     # PRM loss mode:
-    #   beta_binom  -> original Beta-Binomial PRM loss
-    #   normal_prm  -> standard PRM soft-label CE fallback loss
+    #   beta_binom    -> original Beta-Binomial PRM
+    #   normal_prm    -> standard PRM soft-label CE
+    #   ensemble_prm  -> ensemble scalar reward heads
     model.config.prm_loss_type = model_args.prm_loss_type
     model.prm_loss_type = model_args.prm_loss_type
+
+    # Ensemble PRM hyperparameters.
+    model.config.ensemble_prm_num_heads = model_args.ensemble_prm_num_heads
+    model.config.ensemble_prm_hidden_dim = model_args.ensemble_prm_hidden_dim
+    model.config.ensemble_prm_dropout = model_args.ensemble_prm_dropout
+
+    model.ensemble_prm_num_heads = int(model_args.ensemble_prm_num_heads)
+    model.ensemble_prm_hidden_dim = int(model_args.ensemble_prm_hidden_dim)
+    model.ensemble_prm_dropout = float(model_args.ensemble_prm_dropout)
+
+    if model_args.prm_loss_type == 'ensemble_prm':
+        if not hasattr(model, 'init_ensemble_prm_head'):
+            raise RuntimeError(
+                "prm_loss_type='ensemble_prm' requires "
+                "InternVLChatModel.init_ensemble_prm_head()."
+            )
+
+        model.init_ensemble_prm_head(force_reinit=False)
+
+        # Make sure the newly created head is trainable.
+        for p in model.ensemble_prm_head.parameters():
+            p.requires_grad = True
+
     if dist.get_rank() == 0:
         logger.info(f'Using PRM loss type: {model_args.prm_loss_type}')
+        if model_args.prm_loss_type == 'ensemble_prm':
+            logger.info(
+                f'Using ensemble PRM head: '
+                f'num_heads={model_args.ensemble_prm_num_heads}, '
+                f'hidden_dim={model_args.ensemble_prm_hidden_dim}, '
+                f'dropout={model_args.ensemble_prm_dropout}'
+            )
+
     
     model.beta_binom_eps = data_args.beta_binom_eps
     # Beta-binomial uncertainty head settings.
@@ -1562,12 +1605,14 @@ def main():
         )
         if dist.get_rank() == 0:
             logger.info(
-                f'Using kappa_head gradient multiplier: {data_args.beta_binom_kappa_head_lr_mult}'
+                f'Using kappa_head gradient multiplier: '
+                f'{data_args.beta_binom_kappa_head_lr_mult}'
             )
     else:
         if dist.get_rank() == 0:
             logger.info(
-                'Normal PRM mode: skip kappa_head reset and kappa_head gradient multiplier.'
+                f'{model_args.prm_loss_type} mode: '
+                f'skip kappa_head reset and kappa_head gradient multiplier.'
             )
 
     # Backward-compatible knobs for older checkpoints.
@@ -1738,10 +1783,10 @@ def main():
         data_collator=collator,
     )
     if model_args.prm_loss_type == 'beta_binom':
-        # Ensure beta stats are injected before TensorBoard flushes logs.
-        trainer.remove_callback(transformers.integrations.TensorBoardCallback)
+        # Ensure beta stats are injected before wandb flushes logs.
+        trainer.remove_callback(transformers.integrations.WandbCallback)
         trainer.add_callback(BetaBinomStatsCallback)
-        trainer.add_callback(transformers.integrations.TensorBoardCallback)
+        trainer.add_callback(transformers.integrations.WandbCallback)
     else:
         if dist.get_rank() == 0:
             logger.info('Normal PRM mode: skip BetaBinomStatsCallback.')

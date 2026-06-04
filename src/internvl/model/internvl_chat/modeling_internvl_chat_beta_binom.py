@@ -29,6 +29,8 @@ from internvl.model.phi3.modeling_phi3 import Phi3ForCausalLM
 
 from .configuration_internvl_chat import InternVLChatConfig
 from .modeling_intern_vit import InternVisionModel, has_flash_attn
+from .ensemble_prm_head import EnsembleScalarRewardHead
+
 
 logger = logging.get_logger(__name__)
 
@@ -149,7 +151,17 @@ class InternVLChatModel(PreTrainedModel):
         self.prm_loss_type = getattr(config, "prm_loss_type", "beta_binom")
         self.prm_label_type = getattr(config, "prm_label_type", "soft_ratio")
         
+        # Ensemble PRM settings. These are only used when
+        # self.prm_loss_type == "ensemble_prm".
+        self.ensemble_prm_num_heads = int(getattr(config, "ensemble_prm_num_heads", 8))
+        self.ensemble_prm_hidden_dim = int(getattr(config, "ensemble_prm_hidden_dim", 128))
+        self.ensemble_prm_dropout = float(getattr(config, "ensemble_prm_dropout", 0.0))
+        self.ensemble_prm_head = None
+        
         self.reset_kappa_head(self.beta_binom_kappa_init)
+        
+        if self.prm_loss_type == "ensemble_prm":
+            self.init_ensemble_prm_head()
 
         if config.use_backbone_lora:
             self.wrap_backbone_lora(
@@ -218,6 +230,44 @@ class InternVLChatModel(PreTrainedModel):
         if x < 1e-6:
             x = 1e-6
         return math.log(math.expm1(x))
+    
+    def init_ensemble_prm_head(self, force_reinit: bool = False):
+        """
+        Initialize the ensemble scalar reward head.
+
+        We keep this as an explicit method instead of always constructing the
+        head in __init__, so beta_binom / normal_prm modes do not introduce
+        unused trainable parameters.
+        """
+        if self.ensemble_prm_head is not None and not force_reinit:
+            return self.ensemble_prm_head
+
+        hidden_size = getattr(
+            self.language_model.config,
+            "hidden_size",
+            self.config.llm_config.hidden_size,
+        )
+
+        self.ensemble_prm_head = EnsembleScalarRewardHead(
+            hidden_size=hidden_size,
+            num_heads=self.ensemble_prm_num_heads,
+            hidden_dim=self.ensemble_prm_hidden_dim,
+            dropout=self.ensemble_prm_dropout,
+        )
+
+        # If the base model has already been moved to a device/dtype, move the
+        # new head accordingly. Avoid touching meta tensors during ZeRO-3 init.
+        try:
+            ref_param = next(self.language_model.parameters())
+            if not getattr(ref_param, "is_meta", False):
+                self.ensemble_prm_head.to(
+                    device=ref_param.device,
+                    dtype=ref_param.dtype,
+                )
+        except StopIteration:
+            pass
+
+        return self.ensemble_prm_head
 
     def reset_kappa_head(self, kappa_init: float):
         # Initialize so that kappa ~= kappa_init at start; keep weights at 0 to start from a constant kappa.
@@ -326,8 +376,10 @@ class InternVLChatModel(PreTrainedModel):
         need_prm_hidden = (
             labels is not None
             and loss_weight is None
-            and prm_counts_k is not None
-            and prm_counts_n is not None
+            and (
+                (prm_counts_k is not None and prm_counts_n is not None)
+                or getattr(self, "prm_loss_type", "beta_binom") == "ensemble_prm"
+            )
         )
 
         last_hidden_state = None
@@ -443,7 +495,70 @@ class InternVLChatModel(PreTrainedModel):
                 and prm_counts_k is not None
                 and prm_counts_n is not None
             )
-            if use_beta_binom:
+            use_ensemble_prm = (
+                getattr(self, "prm_loss_type", "beta_binom") == "ensemble_prm"
+            )
+            if use_ensemble_prm:
+                if last_hidden_state is None:
+                    raise RuntimeError(
+                        "ensemble_prm requires last_hidden_state. "
+                        "Please make sure output_hidden_states=True when prm_loss_type='ensemble_prm'."
+                    )
+
+                if self.ensemble_prm_head is None:
+                    raise RuntimeError(
+                        "ensemble_prm_head is not initialized. "
+                        "Call model.init_ensemble_prm_head() before constructing Trainer/optimizer."
+                    )
+
+                flat_prm_mask = placeholder_mask.contiguous().view(-1)
+
+                last_h = last_hidden_state.contiguous().view(
+                    -1, last_hidden_state.shape[-1]
+                )
+                prm_h = last_h[flat_prm_mask]  # [M, H]
+
+                if prm_h.numel() == 0:
+                    loss = logits.sum() * 0.0
+                    with torch.no_grad():
+                        self._beta_last_stats = {
+                            "ensemble_prm_loss": 0.0,
+                            "ensemble_reward_mean": 0.0,
+                            "ensemble_reward_std": 0.0,
+                            "ensemble_target_mean": 0.0,
+                            "valid_prm_count": 0.0,
+                        }
+                else:
+                    # selected_labels: [M], soft PRM target in [0, 1], usually K / N.
+                    target = selected_labels.to(device=prm_h.device, dtype=torch.float32).clamp(0.0, 1.0)
+
+                    # ensemble_logits: [E, M]
+                    ensemble_logits = self.ensemble_prm_head(prm_h)
+
+                    # target_expand: [E, M]
+                    target_expand = target[None, :].expand_as(ensemble_logits)
+
+                    cls_loss = F.binary_cross_entropy_with_logits(
+                        ensemble_logits.float(),
+                        target_expand.float(),
+                        reduction="mean",
+                    )
+
+                    loss = cls_loss
+
+                    with torch.no_grad():
+                        ensemble_probs = torch.sigmoid(ensemble_logits.float())  # [E, M]
+                        reward_mean = ensemble_probs.mean(dim=0)                 # [M]
+                        reward_std = ensemble_probs.std(dim=0, unbiased=False)   # [M]
+
+                        self._beta_last_stats = {
+                            "ensemble_prm_loss": float(cls_loss.detach().item()),
+                            "ensemble_reward_mean": float(reward_mean.mean().detach().item()),
+                            "ensemble_reward_std": float(reward_std.mean().detach().item()),
+                            "ensemble_target_mean": float(target.mean().detach().item()),
+                            "valid_prm_count": float(prm_h.size(0)),
+                        }
+            elif use_beta_binom:
                 selected_k = prm_counts_k.contiguous().view(-1)[placeholder_mask]
                 selected_n = prm_counts_n.contiguous().view(-1)[placeholder_mask]
                 valid_kn = (selected_n > 0) & (selected_k >= 0) & (selected_k <= selected_n)
@@ -529,7 +644,7 @@ class InternVLChatModel(PreTrainedModel):
                 else:
                     use_beta_binom = False
 
-            if not use_beta_binom:
+            else:
                 loss_fct = CrossEntropyLoss()
                 positive_labels = selected_labels.to(selected_logits.dtype)
                 negative_labels = 1 - positive_labels

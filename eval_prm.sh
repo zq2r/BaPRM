@@ -14,7 +14,7 @@ export PYTHONPATH="${REPO_ROOT}/src:${REPO_ROOT}:${PYTHONPATH:-}"
 # =========================
 # User configs
 # =========================
-model_name=${model_name:-"InternVL2_5-8B"}
+model_name=${model_name:-"InternVL2_5-2B"}
 
 # Choose PRM mode:
 #   beta
@@ -26,7 +26,7 @@ PRM_MODE=${PRM_MODE:-"beta"}
 #   MathVision
 #   MathVerse
 #   OlympiadBench
-BENCH=${BENCH:-"OlympiadBench"}
+BENCH=${BENCH:-"MathVerse"}
 MASTER_PORT=${MASTER_PORT:-63704}
 
 case "${PRM_MODE}" in
