@@ -156,6 +156,41 @@ class BetaBinomStatsCallback(TrainerCallback):
             return
         for k, v in stats.items():
             logs[f'train/{k}'] = float(v)
+            
+class PRMStatsCallback(TrainerCallback):
+    """
+    Generic PRM stats logger for non-beta PRM modes.
+
+    It only injects model._beta_last_stats into logs.
+    It does not reset kappa_head or touch beta-binomial-specific modules.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._model_ref = None
+
+    def on_train_begin(self, args, state, control, model=None, **kwargs):
+        if model is not None:
+            self._model_ref = model
+
+    def on_log(self, args, state, control, logs=None, model=None, **kwargs):
+        if logs is None:
+            return
+
+        if model is None:
+            model = self._model_ref
+
+        if model is None:
+            return
+
+        target_model = model.module if hasattr(model, 'module') else model
+        stats = getattr(target_model, '_beta_last_stats', None)
+
+        if not stats:
+            return
+
+        for k, v in stats.items():
+            logs[f'train/{k}'] = float(v)
 
 
 def attach_kappa_head_grad_multiplier(model, mult: float):
@@ -1783,13 +1818,17 @@ def main():
         data_collator=collator,
     )
     if model_args.prm_loss_type == 'beta_binom':
-        # Ensure beta stats are injected before wandb flushes logs.
         trainer.remove_callback(transformers.integrations.WandbCallback)
         trainer.add_callback(BetaBinomStatsCallback)
         trainer.add_callback(transformers.integrations.WandbCallback)
+
+    elif model_args.prm_loss_type == 'ensemble_prm':
+        trainer.remove_callback(transformers.integrations.WandbCallback)
+        trainer.add_callback(PRMStatsCallback)
+        trainer.add_callback(transformers.integrations.WandbCallback)
+
     else:
-        if dist.get_rank() == 0:
-            logger.info('Normal PRM mode: skip BetaBinomStatsCallback.')
+        logger.info('Normal PRM mode: skip PRM stats callback.')
 
     # Training
     if training_args.do_train:

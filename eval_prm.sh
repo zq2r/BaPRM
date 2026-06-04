@@ -19,7 +19,7 @@ model_name=${model_name:-"InternVL2_5-2B"}
 # Choose PRM mode:
 #   beta
 #   normal
-PRM_MODE=${PRM_MODE:-"beta"}
+PRM_MODE=${PRM_MODE:-"normal"}
 
 # Choose benchmark:
 #   MathVista
@@ -27,7 +27,7 @@ PRM_MODE=${PRM_MODE:-"beta"}
 #   MathVerse
 #   OlympiadBench
 BENCH=${BENCH:-"MathVerse"}
-MASTER_PORT=${MASTER_PORT:-63704}
+MASTER_PORT=${MASTER_PORT:-63702}
 
 case "${PRM_MODE}" in
   beta)
