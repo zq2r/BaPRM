@@ -17,16 +17,14 @@ export PYTHONPATH="${REPO_ROOT}/src:${REPO_ROOT}:${PYTHONPATH:-}"
 model_name=${model_name:-"InternVL2_5-2B"}
 
 # Choose PRM mode:
-#   beta
-#   normal
+# beta
+# normal
 PRM_MODE=${PRM_MODE:-"normal"}
 
-# Choose benchmark:
-#   MathVista
-#   MathVision
-#   MathVerse
-#   OlympiadBench
-BENCH=${BENCH:-"MathVerse"}
+# 写一个就跑一个，写多个就顺序跑多个
+# Supported: MathVista MathVision MathVerse OlympiadBench
+benchs=${benchs:-"MathVista MathVision OlympiadBench"}
+
 MASTER_PORT=${MASTER_PORT:-63702}
 
 case "${PRM_MODE}" in
@@ -61,98 +59,109 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3"}
 # Only used by beta-binomial PRM.
 SCORE_MODE=${SCORE_MODE:-"mu_minus_lambda_sigma"}
 
-# =========================
-# Benchmark mapping
-# =========================
-case "${BENCH}" in
-  MathVista)
-    EVAL_SCRIPT="eval/prm/evaluate_mathvista_prm_${SCRIPT_SUFFIX}.py"
-    DATASET_NAME="mathvista_prm"
-    DEFAULT_ROOT="datasets/MathVista/extracted_images"
-    DEFAULT_ANNOTATION="datasets/MathVista/MathVista_rollout_annotation_InternVL8B_oversample.json"
-    ;;
-
-  MathVision)
-    EVAL_SCRIPT="eval/prm/evaluate_mathvision_prm_${SCRIPT_SUFFIX}.py"
-    DATASET_NAME="mathvision_prm"
-    DEFAULT_ROOT="datasets/MathVision/extracted_images"
-    DEFAULT_ANNOTATION="datasets/MathVision/MathVision_rollout_annotation_InternVL8B_oversample.json"
-    ;;
-
-  MathVerse)
-    EVAL_SCRIPT="eval/prm/evaluate_mathverse_prm_${SCRIPT_SUFFIX}.py"
-    DATASET_NAME="mathverse_prm"
-    DEFAULT_ROOT="datasets/MathVerse/extracted_images"
-    DEFAULT_ANNOTATION="datasets/MathVerse/MathVerse_rollout_annotation_InternVL8B_oversample.json"
-    ;;
-
-  OlympiadBench)
-    EVAL_SCRIPT="eval/prm/evaluate_olympiadbench_prm_${SCRIPT_SUFFIX}.py"
-    DATASET_NAME="olympiadbench_prm"
-    DEFAULT_ROOT="."
-    DEFAULT_ANNOTATION="datasets/OlympiadBench/OlympiadBench_rollout_annotation_InternVL8B_oversample.json"
-    ;;
-
-  *)
-    echo "ERROR: Unknown BENCH=${BENCH}"
-    echo "Supported: MathVista, MathVision, MathVerse, OlympiadBench"
-    exit 1
-    ;;
-esac
-
-ROOT=${ROOT:-"${DEFAULT_ROOT}"}
-ANNOTATION=${ANNOTATION:-"${DEFAULT_ANNOTATION}"}
-OUT_DIR=${OUT_DIR:-"${CKPT_ROOT}/eval_${PRM_MODE}_${BENCH}/$(basename "${CKPT}")"}
-
-mkdir -p "${OUT_DIR}"
-
-echo "========== Eval Config =========="
-echo "PRM_MODE: ${PRM_MODE}"
-echo "BENCH: ${BENCH}"
-echo "EVAL_SCRIPT: ${EVAL_SCRIPT}"
-echo "DATASET_NAME: ${DATASET_NAME}"
-echo "CKPT_ROOT: ${CKPT_ROOT}"
-echo "CKPT: ${CKPT}"
-echo "ROOT: ${ROOT}"
-echo "ANNOTATION: ${ANNOTATION}"
-echo "OUT_DIR: ${OUT_DIR}"
-echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
-echo "GPUS: ${GPUS}"
-if [ "${PRM_MODE}" = "beta" ]; then
-  echo "SCORE_MODE: ${SCORE_MODE}"
-fi
-echo "================================="
-
 if [ ! -d "${CKPT}" ]; then
   echo "ERROR: checkpoint does not exist: ${CKPT}"
   exit 1
 fi
 
-if [ ! -f "${ANNOTATION}" ]; then
-  echo "ERROR: annotation file does not exist: ${ANNOTATION}"
-  exit 1
-fi
+run_one_benchmark() {
+  local BENCH="$1"
+  local PORT="$2"
 
-if [ ! -f "${EVAL_SCRIPT}" ]; then
-  echo "ERROR: eval script does not exist: ${EVAL_SCRIPT}"
-  exit 1
-fi
+  # =========================
+  # Benchmark mapping
+  # =========================
+  case "${BENCH}" in
+    MathVista)
+      EVAL_SCRIPT="eval/prm/evaluate_mathvista_prm_${SCRIPT_SUFFIX}.py"
+      DATASET_NAME="mathvista_prm"
+      DEFAULT_ROOT="datasets/MathVista/extracted_images"
+      DEFAULT_ANNOTATION="datasets/MathVista/MathVista_rollout_annotation_InternVL8B_oversample.json"
+      ;;
+    MathVision)
+      EVAL_SCRIPT="eval/prm/evaluate_mathvision_prm_${SCRIPT_SUFFIX}.py"
+      DATASET_NAME="mathvision_prm"
+      DEFAULT_ROOT="datasets/MathVision/extracted_images"
+      DEFAULT_ANNOTATION="datasets/MathVision/MathVision_rollout_annotation_InternVL8B_oversample.json"
+      ;;
+    MathVerse)
+      EVAL_SCRIPT="eval/prm/evaluate_mathverse_prm_${SCRIPT_SUFFIX}.py"
+      DATASET_NAME="mathverse_prm"
+      DEFAULT_ROOT="datasets/MathVerse/extracted_images"
+      DEFAULT_ANNOTATION="datasets/MathVerse/MathVerse_rollout_annotation_InternVL8B_oversample.json"
+      ;;
+    OlympiadBench)
+      EVAL_SCRIPT="eval/prm/evaluate_olympiadbench_prm_${SCRIPT_SUFFIX}.py"
+      DATASET_NAME="olympiadbench_prm"
+      DEFAULT_ROOT="."
+      DEFAULT_ANNOTATION="datasets/OlympiadBench/OlympiadBench_rollout_annotation_InternVL8B_oversample.json"
+      ;;
+    *)
+      echo "ERROR: Unknown benchmark: ${BENCH}"
+      echo "Supported: MathVista, MathVision, MathVerse, OlympiadBench"
+      exit 1
+      ;;
+  esac
 
-EXTRA_ARGS=()
-if [ "${PRM_MODE}" = "beta" ]; then
-  EXTRA_ARGS+=(--score-mode "${SCORE_MODE}")
-fi
+  ROOT_THIS="${ROOT:-${DEFAULT_ROOT}}"
+  ANNOTATION_THIS="${ANNOTATION:-${DEFAULT_ANNOTATION}}"
+  OUT_DIR="${CKPT_ROOT}/eval_${PRM_MODE}_${BENCH}/$(basename "${CKPT}")"
 
-torchrun \
-  --nnodes=1 \
-  --node_rank=0 \
-  --master_addr=127.0.0.1 \
-  --nproc_per_node="${GPUS}" \
-  --master_port="${MASTER_PORT}" \
-  "${EVAL_SCRIPT}" \
-  --checkpoint "${CKPT}" \
-  --datasets "${DATASET_NAME}" \
-  --root "${ROOT}" \
-  --annotation "${ANNOTATION}" \
-  --out-dir "${OUT_DIR}" \
-  "${EXTRA_ARGS[@]}"
+  mkdir -p "${OUT_DIR}"
+
+  if [ ! -f "${ANNOTATION_THIS}" ]; then
+    echo "ERROR: annotation file does not exist: ${ANNOTATION_THIS}"
+    exit 1
+  fi
+
+  if [ ! -f "${EVAL_SCRIPT}" ]; then
+    echo "ERROR: eval script does not exist: ${EVAL_SCRIPT}"
+    exit 1
+  fi
+
+  EXTRA_ARGS=()
+  if [ "${PRM_MODE}" = "beta" ]; then
+    EXTRA_ARGS+=(--score-mode "${SCORE_MODE}")
+  fi
+
+  echo "========== Eval Config =========="
+  echo "PRM_MODE: ${PRM_MODE}"
+  echo "BENCH: ${BENCH}"
+  echo "EVAL_SCRIPT: ${EVAL_SCRIPT}"
+  echo "DATASET_NAME: ${DATASET_NAME}"
+  echo "CKPT_ROOT: ${CKPT_ROOT}"
+  echo "CKPT: ${CKPT}"
+  echo "ROOT: ${ROOT_THIS}"
+  echo "ANNOTATION: ${ANNOTATION_THIS}"
+  echo "OUT_DIR: ${OUT_DIR}"
+  echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
+  echo "GPUS: ${GPUS}"
+  echo "MASTER_PORT: ${PORT}"
+  if [ "${PRM_MODE}" = "beta" ]; then
+    echo "SCORE_MODE: ${SCORE_MODE}"
+  fi
+  echo "================================="
+
+  torchrun \
+    --nnodes=1 \
+    --node_rank=0 \
+    --master_addr=127.0.0.1 \
+    --nproc_per_node="${GPUS}" \
+    --master_port="${PORT}" \
+    "${EVAL_SCRIPT}" \
+    --checkpoint "${CKPT}" \
+    --datasets "${DATASET_NAME}" \
+    --root "${ROOT_THIS}" \
+    --annotation "${ANNOTATION_THIS}" \
+    --out-dir "${OUT_DIR}" \
+    "${EXTRA_ARGS[@]}"
+}
+
+idx=0
+for BENCH in ${benchs}; do
+  PORT=$((MASTER_PORT + idx))
+  run_one_benchmark "${BENCH}" "${PORT}"
+  idx=$((idx + 1))
+done
+
+echo "All requested benchmarks finished: ${benchs}"

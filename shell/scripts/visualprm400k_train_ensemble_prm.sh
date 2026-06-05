@@ -10,18 +10,30 @@ export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 
-# hyperparameters needed to specify
+# =========================
+# Basic configs
+# =========================
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3"}
 GPUS=${GPUS:-4}
-model_name=${model_name:-"InternVL3-8B"}
-export MASTER_PORT=${MASTER_PORT:-4321}
+model_name=${model_name:-"InternVL3-2B"}
+export MASTER_PORT=${MASTER_PORT:-4325}
 RESUME_TRAINING=${RESUME_TRAINING:-0}
 SAVE_ONLY_MODEL=${SAVE_ONLY_MODEL:-True}
 
-OUTPUT_DIR=${OUTPUT_DIR:-"/inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/project/Beta-Binomial-PRM/log/beta-${model_name}-visualprm400k"}
+# =========================
+# Ensemble PRM hyperparams
+# =========================
+ENSEMBLE_PRM_NUM_HEADS=${ENSEMBLE_PRM_NUM_HEADS:-5}
+ENSEMBLE_PRM_HIDDEN_DIM=${ENSEMBLE_PRM_HIDDEN_DIM:-256}
+ENSEMBLE_PRM_DROPOUT=${ENSEMBLE_PRM_DROPOUT:-0.0}
+
+# Use repo-relative log dir by default.
+OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/log/ensemble-${model_name}-visualprm400k"}
+
 if [ ! -d "$OUTPUT_DIR" ]; then
   mkdir -p "$OUTPUT_DIR"
 fi
+
 # =========================
 # Resume / fresh-start logic
 # =========================
@@ -43,19 +55,20 @@ else
   rm -rf "${OUTPUT_DIR}"/checkpoint-*
 fi
 
-
-
-export WANDB_MODE=offline
+# =========================
+# WandB
+# =========================
+export WANDB_MODE=${WANDB_MODE:-offline}
 export WANDB_PROJECT=${WANDB_PROJECT:-"Beta-PRM"}
-export WANDB_NAME=${WANDB_NAME:-"beta-${model_name}-visualprm400k"}
-# group: hyperparameter
-export WANDB_RUN_GROUP=${WANDB_RUN_GROUP:-"beta-${model_name}"}
-# tag: dataset
+export WANDB_NAME=${WANDB_NAME:-"ensemble-${model_name}-visualprm400k"}
+export WANDB_RUN_GROUP=${WANDB_RUN_GROUP:-"ensemble-${model_name}"}
 export WANDB_TAGS=${WANDB_TAGS:-"visualprm400k"}
 export WANDB_DIR=${WANDB_DIR:-"${OUTPUT_DIR}/wandb"}
 mkdir -p "${WANDB_DIR}"
 
-
+# =========================
+# Batch / data / model paths
+# =========================
 BATCH_SIZE=${BATCH_SIZE:-16}
 PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-1}
 GRADIENT_ACC=$((BATCH_SIZE / PER_DEVICE_BATCH_SIZE / GPUS))
@@ -73,6 +86,9 @@ export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
 export TF_CPP_MIN_LOG_LEVEL=3
 export LAUNCHER=pytorch
 
+# =========================
+# CUDA include path fix
+# =========================
 if [ -z "${CUDA_HOME:-}" ] && command -v nvcc >/dev/null 2>&1; then
   export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"
 fi
@@ -81,8 +97,8 @@ if [ -n "${CUDA_HOME:-}" ]; then
   export PATH="${CUDA_HOME}/bin:${PATH}"
 fi
 
-CUDA_TARGETS_INCLUDE="${CUDA_HOME}/targets/x86_64-linux/include"
-CUDA_CCCL_INCLUDE="${CUDA_HOME}/targets/x86_64-linux/include/cccl"
+CUDA_TARGETS_INCLUDE="${CUDA_HOME:-}/targets/x86_64-linux/include"
+CUDA_CCCL_INCLUDE="${CUDA_HOME:-}/targets/x86_64-linux/include/cccl"
 
 if [ -d "${CUDA_TARGETS_INCLUDE}" ]; then
   export CPATH="${CUDA_TARGETS_INCLUDE}:${CPATH:-}"
@@ -97,12 +113,37 @@ fi
 export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-/inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/cache/torch_extensions}
 mkdir -p "${TORCH_EXTENSIONS_DIR}"
 
-# Beta-Binom PRM hyperparams
+# =========================
+# Beta-Binom args
+# Kept for compatibility with the shared training entry.
+# They are skipped internally when prm_loss_type=ensemble_prm.
+# =========================
 BETA_BINOM_KAPPA_MIN=${BETA_BINOM_KAPPA_MIN:-1e-3}
 BETA_BINOM_KAPPA_INIT=${BETA_BINOM_KAPPA_INIT:-4.0}
 BETA_BINOM_EVI_REG=${BETA_BINOM_EVI_REG:-5e-2}
 BETA_BINOM_KAPPA_HEAD_LR_MULT=${BETA_BINOM_KAPPA_HEAD_LR_MULT:-10.0}
 
+
+
+echo "========== Train Config =========="
+echo "REPO_ROOT: ${REPO_ROOT}"
+echo "MODEL_PATH: ${MODEL_PATH}"
+echo "OUTPUT_DIR: ${OUTPUT_DIR}"
+echo "META_PATH: ${META_PATH}"
+echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
+echo "GPUS: ${GPUS}"
+echo "BATCH_SIZE: ${BATCH_SIZE}"
+echo "PER_DEVICE_BATCH_SIZE: ${PER_DEVICE_BATCH_SIZE}"
+echo "GRADIENT_ACC: ${GRADIENT_ACC}"
+echo "PRM_LOSS_TYPE: ensemble_prm"
+echo "ENSEMBLE_PRM_NUM_HEADS: ${ENSEMBLE_PRM_NUM_HEADS}"
+echo "ENSEMBLE_PRM_HIDDEN_DIM: ${ENSEMBLE_PRM_HIDDEN_DIM}"
+echo "ENSEMBLE_PRM_DROPOUT: ${ENSEMBLE_PRM_DROPOUT}"
+echo "WANDB_PROJECT: ${WANDB_PROJECT}"
+echo "WANDB_NAME: ${WANDB_NAME}"
+echo "WANDB_RUN_GROUP: ${WANDB_RUN_GROUP}"
+echo "WANDB_TAGS: ${WANDB_TAGS}"
+echo "=================================="
 
 python -m torch.distributed.run \
   --nnodes=${NNODES} \
@@ -141,6 +182,10 @@ python -m torch.distributed.run \
   --lr_scheduler_type "cosine" \
   --logging_steps 100 \
   --max_seq_length 8192 \
+  --prm_loss_type ensemble_prm \
+  --ensemble_prm_num_heads ${ENSEMBLE_PRM_NUM_HEADS} \
+  --ensemble_prm_hidden_dim ${ENSEMBLE_PRM_HIDDEN_DIM} \
+  --ensemble_prm_dropout ${ENSEMBLE_PRM_DROPOUT} \
   --beta_binom_kappa_min ${BETA_BINOM_KAPPA_MIN} \
   --beta_binom_kappa_init ${BETA_BINOM_KAPPA_INIT} \
   --beta_binom_evi_reg ${BETA_BINOM_EVI_REG} \

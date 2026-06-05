@@ -133,7 +133,7 @@ python -m torch.distributed.run \
   --gradient_accumulation_steps ${GRADIENT_ACC} \
   --save_strategy "steps" \
   --save_only_model ${SAVE_ONLY_MODEL} \
-  --save_steps 100 \
+  --save_steps 500 \
   --save_total_limit 1 \
   --learning_rate 1e-5 \
   --weight_decay 0.05 \
@@ -183,4 +183,4 @@ for i, line in enumerate(sys.stdin, 1):
         dump()
 
 dump()
-' "${OUTPUT_DIR}/training_log.txt" 5000 100
+' "${OUTPUT_DIR}/training_log.txt" 1000 100
