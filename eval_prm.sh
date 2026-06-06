@@ -19,6 +19,7 @@ model_name=${model_name:-"InternVL2_5-8B"}
 # Choose PRM mode:
 # beta
 # normal
+# ensemble
 PRM_MODE=${PRM_MODE:-"normal"}
 
 # 写一个就跑一个，写多个就顺序跑多个
@@ -36,9 +37,13 @@ case "${PRM_MODE}" in
     CKPT_ROOT=${CKPT_ROOT:-"${REPO_ROOT}/log/normal-${model_name}-visualprm400k"}
     SCRIPT_SUFFIX="normal"
     ;;
+  ensemble)
+    CKPT_ROOT=${CKPT_ROOT:-"${REPO_ROOT}/log/ensemble-${model_name}-visualprm400k"}
+    SCRIPT_SUFFIX="ensemble"
+    ;;
   *)
     echo "ERROR: Unknown PRM_MODE=${PRM_MODE}"
-    echo "Supported: beta, normal"
+    echo "Supported: beta, normal, ensemble"
     exit 1
     ;;
 esac
