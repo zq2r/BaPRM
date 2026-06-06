@@ -15,7 +15,7 @@ export HF_DATASETS_OFFLINE=1
 # =========================
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3"}
 GPUS=${GPUS:-4}
-model_name=${model_name:-"InternVL3-2B"}
+model_name=${model_name:-"InternVL3-8B"}
 export MASTER_PORT=${MASTER_PORT:-4325}
 RESUME_TRAINING=${RESUME_TRAINING:-0}
 SAVE_ONLY_MODEL=${SAVE_ONLY_MODEL:-True}

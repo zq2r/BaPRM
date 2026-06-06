@@ -14,7 +14,7 @@ export PYTHONPATH="${REPO_ROOT}/src:${REPO_ROOT}:${PYTHONPATH:-}"
 # =========================
 # User configs
 # =========================
-model_name=${model_name:-"InternVL2_5-2B"}
+model_name=${model_name:-"InternVL2_5-8B"}
 
 # Choose PRM mode:
 # beta
@@ -23,7 +23,7 @@ PRM_MODE=${PRM_MODE:-"normal"}
 
 # 写一个就跑一个，写多个就顺序跑多个
 # Supported: MathVista MathVision MathVerse OlympiadBench
-benchs=${benchs:-"MathVista MathVision OlympiadBench"}
+benchs=${benchs:-"MathVista MathVision OlympiadBench MathVerse"}
 
 MASTER_PORT=${MASTER_PORT:-63702}
 
