@@ -887,6 +887,13 @@ class LazySupervisedDataset(Dataset):
     def get_image_path(self, image_path):
         if image_path.startswith('s3://'):  # for ceph
             image_path = self.root + image_path
+        elif image_path.startswith('images/train-'):
+            image_path = os.path.join(
+                self.root,
+                'VisualPRM400K-v1.1-Raw',
+                'nlvr2',
+                image_path,
+            )
         else:  # for local image
             image_path = os.path.join(self.root, image_path)
         return image_path

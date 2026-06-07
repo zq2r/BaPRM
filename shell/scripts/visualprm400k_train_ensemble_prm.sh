@@ -69,8 +69,8 @@ mkdir -p "${WANDB_DIR}"
 # =========================
 # Batch / data / model paths
 # =========================
-BATCH_SIZE=${BATCH_SIZE:-16}
-PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-1}
+BATCH_SIZE=${BATCH_SIZE:-512}
+PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-2}
 GRADIENT_ACC=$((BATCH_SIZE / PER_DEVICE_BATCH_SIZE / GPUS))
 
 META_PATH=${META_PATH:-"${REPO_ROOT}/shell/data/meta_visualprm400k_beta_binom.json"}
@@ -174,13 +174,13 @@ python -m torch.distributed.run \
   --gradient_accumulation_steps ${GRADIENT_ACC} \
   --save_strategy "steps" \
   --save_only_model ${SAVE_ONLY_MODEL} \
-  --save_steps 500 \
+  --save_steps 100 \
   --save_total_limit 1 \
   --learning_rate 1e-5 \
   --weight_decay 0.05 \
   --warmup_ratio 0.05 \
   --lr_scheduler_type "cosine" \
-  --logging_steps 100 \
+  --logging_steps 1 \
   --max_seq_length 8192 \
   --prm_loss_type ensemble_prm \
   --ensemble_prm_num_heads ${ENSEMBLE_PRM_NUM_HEADS} \

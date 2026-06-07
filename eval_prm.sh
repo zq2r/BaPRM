@@ -14,17 +14,21 @@ export PYTHONPATH="${REPO_ROOT}/src:${REPO_ROOT}:${PYTHONPATH:-}"
 # =========================
 # User configs
 # =========================
-model_name=${model_name:-"InternVL2_5-8B"}
+model_name=${model_name:-"InternVL3-8B"}
 
 # Choose PRM mode:
 # beta
 # normal
 # ensemble
-PRM_MODE=${PRM_MODE:-"normal"}
+PRM_MODE=${PRM_MODE:-"beta"}
 
 # 写一个就跑一个，写多个就顺序跑多个
 # Supported: MathVista MathVision MathVerse OlympiadBench
-benchs=${benchs:-"MathVista MathVision OlympiadBench MathVerse"}
+benchs=${benchs:-"OlympiadBench MathVerse"}
+
+# Default rollout annotation variant when ANNOTATION is not set explicitly.
+# Supported examples: oversample, oversample_2
+ANNOTATION_TAG=${ANNOTATION_TAG:-"oversample_2"}
 
 MASTER_PORT=${MASTER_PORT:-63702}
 
@@ -81,25 +85,25 @@ run_one_benchmark() {
       EVAL_SCRIPT="eval/prm/evaluate_mathvista_prm_${SCRIPT_SUFFIX}.py"
       DATASET_NAME="mathvista_prm"
       DEFAULT_ROOT="datasets/MathVista/extracted_images"
-      DEFAULT_ANNOTATION="datasets/MathVista/MathVista_rollout_annotation_InternVL8B_oversample.json"
+      DEFAULT_ANNOTATION="datasets/MathVista/MathVista_rollout_annotation_InternVL8B_${ANNOTATION_TAG}.json"
       ;;
     MathVision)
       EVAL_SCRIPT="eval/prm/evaluate_mathvision_prm_${SCRIPT_SUFFIX}.py"
       DATASET_NAME="mathvision_prm"
       DEFAULT_ROOT="datasets/MathVision/extracted_images"
-      DEFAULT_ANNOTATION="datasets/MathVision/MathVision_rollout_annotation_InternVL8B_oversample.json"
+      DEFAULT_ANNOTATION="datasets/MathVision/MathVision_rollout_annotation_InternVL8B_${ANNOTATION_TAG}.json"
       ;;
     MathVerse)
       EVAL_SCRIPT="eval/prm/evaluate_mathverse_prm_${SCRIPT_SUFFIX}.py"
       DATASET_NAME="mathverse_prm"
       DEFAULT_ROOT="datasets/MathVerse/extracted_images"
-      DEFAULT_ANNOTATION="datasets/MathVerse/MathVerse_rollout_annotation_InternVL8B_oversample.json"
+      DEFAULT_ANNOTATION="datasets/MathVerse/MathVerse_rollout_annotation_InternVL8B_${ANNOTATION_TAG}.json"
       ;;
     OlympiadBench)
       EVAL_SCRIPT="eval/prm/evaluate_olympiadbench_prm_${SCRIPT_SUFFIX}.py"
       DATASET_NAME="olympiadbench_prm"
       DEFAULT_ROOT="."
-      DEFAULT_ANNOTATION="datasets/OlympiadBench/OlympiadBench_rollout_annotation_InternVL8B_oversample.json"
+      DEFAULT_ANNOTATION="datasets/OlympiadBench/OlympiadBench_rollout_annotation_InternVL8B_${ANNOTATION_TAG}.json"
       ;;
     *)
       echo "ERROR: Unknown benchmark: ${BENCH}"
@@ -108,9 +112,66 @@ run_one_benchmark() {
       ;;
   esac
 
-  ROOT_THIS="${ROOT:-${DEFAULT_ROOT}}"
-  ANNOTATION_THIS="${ANNOTATION:-${DEFAULT_ANNOTATION}}"
-  OUT_DIR="${CKPT_ROOT}/eval_${PRM_MODE}_${BENCH}/$(basename "${CKPT}")"
+ROOT_THIS="${ROOT:-${DEFAULT_ROOT}}"
+ANNOTATION_THIS="${ANNOTATION:-${DEFAULT_ANNOTATION}}"
+
+if [ -n "${ANNOTATION:-}" ]; then
+  ANNOTATION_DIR_TAG="$(basename "${ANNOTATION_THIS}" .json)"
+else
+  ANNOTATION_DIR_TAG="${ANNOTATION_TAG}"
+fi
+
+# OlympiadBench 的 annotation 可能包含作者机器上的绝对路径：
+# /storage1/jiaxinh/Active/jinyuan/MM-PRM/...
+# 这里自动重写成当前 REPO_ROOT 下的路径。
+if [ "${BENCH}" = "OlympiadBench" ]; then
+  FIXED_ANNOTATION="${CKPT_ROOT}/fixed_annotations/OlympiadBench_${ANNOTATION_DIR_TAG}.json"
+  mkdir -p "$(dirname "${FIXED_ANNOTATION}")"
+
+  SRC_ANNOTATION="${ANNOTATION_THIS}" \
+  DST_ANNOTATION="${FIXED_ANNOTATION}" \
+  REPO_ROOT="${REPO_ROOT}" \
+  python - <<'PY'
+import json
+import os
+
+src = os.environ["SRC_ANNOTATION"]
+dst = os.environ["DST_ANNOTATION"]
+repo_root = os.environ["REPO_ROOT"]
+
+old_prefixes = [
+    "/storage1/jiaxinh/Active/jinyuan/MM-PRM",
+]
+
+def fix_obj(x):
+    if isinstance(x, dict):
+        return {k: fix_obj(v) for k, v in x.items()}
+    if isinstance(x, list):
+        return [fix_obj(v) for v in x]
+    if isinstance(x, str):
+        y = x
+        for old in old_prefixes:
+            if old in y:
+                y = y.replace(old, repo_root)
+        return y
+    return x
+
+with open(src, "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+data = fix_obj(data)
+
+with open(dst, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+
+print(f"[fix annotation] {src} -> {dst}")
+PY
+
+  ANNOTATION_THIS="${FIXED_ANNOTATION}"
+
+fi
+
+OUT_DIR="${CKPT_ROOT}/eval_${PRM_MODE}_${BENCH}/${ANNOTATION_DIR_TAG}/$(basename "${CKPT}")"
 
   mkdir -p "${OUT_DIR}"
 
@@ -138,6 +199,8 @@ run_one_benchmark() {
   echo "CKPT: ${CKPT}"
   echo "ROOT: ${ROOT_THIS}"
   echo "ANNOTATION: ${ANNOTATION_THIS}"
+  echo "ANNOTATION_TAG: ${ANNOTATION_TAG}"
+  echo "ANNOTATION_DIR_TAG: ${ANNOTATION_DIR_TAG}"
   echo "OUT_DIR: ${OUT_DIR}"
   echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
   echo "GPUS: ${GPUS}"
