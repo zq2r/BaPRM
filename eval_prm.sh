@@ -24,7 +24,7 @@ PRM_MODE=${PRM_MODE:-"beta"}
 
 # 写一个就跑一个，写多个就顺序跑多个
 # Supported: MathVista MathVision MathVerse OlympiadBench
-benchs=${benchs:-"OlympiadBench MathVerse"}
+benchs=${benchs:-"MathVision OlympiadBench MathVerse"}
 
 # Default rollout annotation variant when ANNOTATION is not set explicitly.
 # Supported examples: oversample, oversample_2
