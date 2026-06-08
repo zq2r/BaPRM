@@ -1650,18 +1650,26 @@ def main():
         model_args.belief_loglik_normalize_by_n
     )
 
-    if model_args.prm_loss_type == 'ensemble_prm':
+    if model_args.prm_loss_type in ('ensemble_prm', 'bayesian_prm'):
         if not hasattr(model, 'init_ensemble_prm_head'):
             raise RuntimeError(
-                "prm_loss_type='ensemble_prm' requires "
+                f"prm_loss_type='{model_args.prm_loss_type}' requires "
                 "InternVLChatModel.init_ensemble_prm_head()."
             )
-
         model.init_ensemble_prm_head(force_reinit=False)
 
-        # Make sure the newly created head is trainable.
+    if model_args.prm_loss_type == 'ensemble_prm':
+        # Make sure the ensemble head is trainable in ensemble PRM training.
         for p in model.ensemble_prm_head.parameters():
             p.requires_grad = True
+
+    if model_args.prm_loss_type == 'bayesian_prm':
+        if not hasattr(model, 'init_belief_head'):
+            raise RuntimeError(
+                "prm_loss_type='bayesian_prm' requires "
+                "InternVLChatModel.init_belief_head()."
+            )
+        model.init_belief_head(force_reinit=False)
 
     if dist.get_rank() == 0:
         logger.info(f'Using PRM loss type: {model_args.prm_loss_type}')
@@ -1865,12 +1873,13 @@ def main():
         tokenizer=tokenizer,
         data_collator=collator,
     )
+    
     if model_args.prm_loss_type == 'beta_binom':
         trainer.remove_callback(transformers.integrations.WandbCallback)
         trainer.add_callback(BetaBinomStatsCallback)
         trainer.add_callback(transformers.integrations.WandbCallback)
 
-    elif model_args.prm_loss_type == 'ensemble_prm':
+    elif model_args.prm_loss_type in ('ensemble_prm', 'bayesian_prm'):
         trainer.remove_callback(transformers.integrations.WandbCallback)
         trainer.add_callback(PRMStatsCallback)
         trainer.add_callback(transformers.integrations.WandbCallback)

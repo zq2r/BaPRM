@@ -543,14 +543,16 @@ class InternVLChatModel(PreTrainedModel):
                     attentions=outputs.attentions,
                 )
 
+            prm_loss_type = getattr(self, "prm_loss_type", "beta_binom")
+
             use_beta_binom = (
-                getattr(self, "prm_loss_type", "beta_binom") == "beta_binom"
+                prm_loss_type == "beta_binom"
                 and prm_counts_k is not None
                 and prm_counts_n is not None
             )
-            use_ensemble_prm = (
-                getattr(self, "prm_loss_type", "beta_binom") == "ensemble_prm"
-            )
+            use_ensemble_prm = prm_loss_type == "ensemble_prm"
+            use_bayesian_prm = prm_loss_type == "bayesian_prm"
+            
             if use_ensemble_prm:
                 if last_hidden_state is None:
                     raise RuntimeError(
@@ -611,6 +613,171 @@ class InternVLChatModel(PreTrainedModel):
                             "ensemble_target_mean": float(target.mean().detach().item()),
                             "valid_prm_count": float(prm_h.size(0)),
                         }
+            elif use_bayesian_prm:
+                if prm_counts_k is None or prm_counts_n is None:
+                    raise RuntimeError(
+                        "bayesian_prm requires prm_counts_k and prm_counts_n. "
+                        "Please use VisualPRM-style count supervision."
+                    )
+
+                if last_hidden_state is None:
+                    raise RuntimeError(
+                        "bayesian_prm requires last_hidden_state. "
+                        "Please make sure hidden states are available for PRM markers."
+                    )
+
+                if self.ensemble_prm_head is None:
+                    raise RuntimeError(
+                        "ensemble_prm_head is not initialized. "
+                        "BayesianPRM requires a frozen ensemble reward head."
+                    )
+
+                if self.belief_head is None:
+                    raise RuntimeError(
+                        "belief_head is not initialized. "
+                        "Call model.init_belief_head() before BayesianPRM training."
+                    )
+
+                flat_prm_mask = placeholder_mask.contiguous().view(-1)
+                last_h = last_hidden_state.contiguous().view(
+                    -1, last_hidden_state.shape[-1]
+                )
+                prm_h_all = last_h[flat_prm_mask]  # [P_all, H]
+
+                selected_k = prm_counts_k.contiguous().view(-1)[placeholder_mask]
+                selected_n = prm_counts_n.contiguous().view(-1)[placeholder_mask]
+
+                valid_kn = (
+                    (selected_n > 0)
+                    & (selected_k >= 0)
+                    & (selected_k <= selected_n)
+                )
+
+                if (prm_h_all.numel() == 0) or (not valid_kn.any()):
+                    loss = logits.sum() * 0.0
+                    with torch.no_grad():
+                        self._beta_last_stats = {
+                            "bayesian_prm_loss": 0.0,
+                            "bayesian_expected_loglik": 0.0,
+                            "bayesian_kl": 0.0,
+                            "bayesian_entropy": 0.0,
+                            "bayesian_weight_top1_mean": 0.0,
+                            "bayesian_weight_max": 0.0,
+                            "bayesian_weight_min": 0.0,
+                            "bayesian_reward_mean": 0.0,
+                            "bayesian_reward_std": 0.0,
+                            "bayesian_uncertainty_mean": 0.0,
+                            "valid_prm_count": 0.0,
+                        }
+                else:
+                    prm_h = prm_h_all[valid_kn]  # [P, H]
+                    selected_k = selected_k[valid_kn].to(
+                        device=prm_h.device, dtype=torch.float32
+                    )
+                    selected_n = selected_n[valid_kn].to(
+                        device=prm_h.device, dtype=torch.float32
+                    )
+
+                    # Frozen ensemble likelihood source.
+                    # ensemble_logits: [E, P]
+                    with torch.no_grad():
+                        ensemble_logits = self.ensemble_prm_head(prm_h.detach())
+                        ensemble_probs = torch.sigmoid(ensemble_logits.float()).clamp(
+                            self.beta_binom_eps,
+                            1.0 - self.beta_binom_eps,
+                        )
+
+                    # mu: [P, E], where E is the number of ensemble heads.
+                    mu = ensemble_probs.transpose(0, 1).contiguous()
+
+                    # Train only the belief network through this loss.  We detach the
+                    # marker hidden states so the belief ELBO does not update the reward
+                    # LLM/projector through prm_h.
+                    belief_logits = self.belief_head(prm_h.detach(), mu.detach())  # [P, E]
+                    weights = F.softmax(belief_logits.float(), dim=-1).clamp(
+                        self.beta_binom_eps,
+                        1.0,
+                    )
+
+                    # Count log-likelihood under each frozen ensemble member:
+                    # log p(K | N, mu_m) = K log mu_m + (N-K) log(1-mu_m)
+                    # The combinatorial term log C(N,K) is omitted because it is constant
+                    # w.r.t. ensemble member m and belief parameters phi.
+                    log_lik = (
+                        selected_k[:, None] * torch.log(mu)
+                        + (selected_n[:, None] - selected_k[:, None])
+                        * torch.log(1.0 - mu)
+                    )
+
+                    if bool(getattr(self, "belief_loglik_normalize_by_n", True)):
+                        log_lik = log_lik / selected_n[:, None].clamp_min(1.0)
+
+                    expected_loglik = (weights * log_lik).sum(dim=-1)
+
+                    num_heads = weights.shape[-1]
+                    log_weights = torch.log(weights.clamp_min(self.beta_binom_eps))
+
+                    # KL(q_phi(z|c) || Uniform(z)) = sum_m w_m log(M w_m)
+                    kl_to_uniform = (
+                        weights * (log_weights + math.log(float(num_heads)))
+                    ).sum(dim=-1)
+
+                    belief_beta_kl = float(getattr(self, "belief_beta_kl", 0.1))
+                    bayesian_prm_loss = (
+                        -expected_loglik + belief_beta_kl * kl_to_uniform
+                    ).mean()
+
+                    loss = bayesian_prm_loss
+
+                    with torch.no_grad():
+                        reward_mean = (weights * mu).sum(dim=-1)  # [P]
+                        weighted_var = (
+                            weights * (mu - reward_mean[:, None]).pow(2)
+                        ).sum(dim=-1)
+                        weighted_uncertainty = torch.sqrt(
+                            weighted_var.clamp_min(0.0)
+                        )
+
+                        entropy = -(weights * log_weights).sum(dim=-1)
+                        top1_weight = weights.max(dim=-1).values
+
+                        self._beta_last_stats = {
+                            "bayesian_prm_loss": float(
+                                bayesian_prm_loss.detach().item()
+                            ),
+                            "bayesian_expected_loglik": float(
+                                expected_loglik.mean().detach().item()
+                            ),
+                            "bayesian_kl": float(
+                                kl_to_uniform.mean().detach().item()
+                            ),
+                            "bayesian_entropy": float(
+                                entropy.mean().detach().item()
+                            ),
+                            "bayesian_weight_top1_mean": float(
+                                top1_weight.mean().detach().item()
+                            ),
+                            "bayesian_weight_max": float(
+                                weights.max().detach().item()
+                            ),
+                            "bayesian_weight_min": float(
+                                weights.min().detach().item()
+                            ),
+                            "bayesian_reward_mean": float(
+                                reward_mean.mean().detach().item()
+                            ),
+                            "bayesian_reward_std": float(
+                                reward_mean.std(unbiased=False).detach().item()
+                            ),
+                            "bayesian_uncertainty_mean": float(
+                                weighted_uncertainty.mean().detach().item()
+                            ),
+                            "bayesian_target_mean": float(
+                                (selected_k / selected_n).mean().detach().item()
+                            ),
+                            "valid_prm_count": float(prm_h.size(0)),
+                        }
+
             elif use_beta_binom:
                 selected_k = prm_counts_k.contiguous().view(-1)[placeholder_mask]
                 selected_n = prm_counts_n.contiguous().view(-1)[placeholder_mask]
