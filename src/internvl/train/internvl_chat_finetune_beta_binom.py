@@ -1621,6 +1621,7 @@ def main():
     #   beta_binom    -> original Beta-Binomial PRM
     #   normal_prm    -> standard PRM soft-label CE
     #   ensemble_prm  -> ensemble scalar reward heads
+    #   bayesian_prm -> frozen ensemble PRM + trainable belief network
     model.config.prm_loss_type = model_args.prm_loss_type
     model.prm_loss_type = model_args.prm_loss_type
 

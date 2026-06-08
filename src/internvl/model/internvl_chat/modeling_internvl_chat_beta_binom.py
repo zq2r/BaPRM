@@ -694,10 +694,7 @@ class InternVLChatModel(PreTrainedModel):
                     # marker hidden states so the belief ELBO does not update the reward
                     # LLM/projector through prm_h.
                     belief_logits = self.belief_head(prm_h.detach(), mu.detach())  # [P, E]
-                    weights = F.softmax(belief_logits.float(), dim=-1).clamp(
-                        self.beta_binom_eps,
-                        1.0,
-                    )
+                    weights = F.softmax(belief_logits.float(), dim=-1)
 
                     # Count log-likelihood under each frozen ensemble member:
                     # log p(K | N, mu_m) = K log mu_m + (N-K) log(1-mu_m)
