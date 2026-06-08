@@ -157,11 +157,21 @@ class InternVLChatModel(PreTrainedModel):
         self.ensemble_prm_hidden_dim = int(getattr(config, "ensemble_prm_hidden_dim", 128))
         self.ensemble_prm_dropout = float(getattr(config, "ensemble_prm_dropout", 0.0))
         self.ensemble_prm_head = None
+        
+        # BayesianPRM belief-network settings. These are only used when
+        # self.prm_loss_type == "bayesian_prm".
+        self.belief_hidden_dim = int(getattr(config, "belief_hidden_dim", 256))
+        self.belief_dropout = float(getattr(config, "belief_dropout", 0.0))
+        self.belief_beta_kl = float(getattr(config, "belief_beta_kl", 0.1))
+        self.belief_use_reward_probs = bool(getattr(config, "belief_use_reward_probs", True))
+        self.belief_loglik_normalize_by_n = bool(
+            getattr(config, "belief_loglik_normalize_by_n", True)
+        )
         self.belief_head = None
         
         self.reset_kappa_head(self.beta_binom_kappa_init)
         
-        if self.prm_loss_type == "ensemble_prm":
+        if self.prm_loss_type in ("ensemble_prm", "bayesian_prm"):
             self.init_ensemble_prm_head()
 
         if self.prm_loss_type == "bayesian_prm":
