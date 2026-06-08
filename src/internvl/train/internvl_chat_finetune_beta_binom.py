@@ -310,12 +310,36 @@ class ModelArguments:
         metadata={"help": "Number of ensemble reward heads for ensemble_prm."},
     )
     ensemble_prm_hidden_dim: int = field(
-        default=128,
+        default=256,
         metadata={"help": "Hidden dimension of each ensemble reward head."},
     )
     ensemble_prm_dropout: float = field(
         default=0.0,
         metadata={"help": "Dropout rate used inside ensemble reward heads."},
+    )
+    belief_hidden_dim: int = field(
+        default=256,
+        metadata={"help": "Hidden dimension of the BayesianPRM belief network."},
+    )
+    belief_dropout: float = field(
+        default=0.0,
+        metadata={"help": "Dropout rate used inside the BayesianPRM belief network."},
+    )
+    belief_beta_kl: float = field(
+        default=0.1,
+        metadata={"help": "KL coefficient beta_KL for BayesianPRM belief ELBO."},
+    )
+    belief_use_reward_probs: bool = field(
+        default=True,
+        metadata={
+            "help": "Concatenate frozen ensemble reward probabilities to belief head input."
+        },
+    )
+    belief_loglik_normalize_by_n: bool = field(
+        default=True,
+        metadata={
+            "help": "Normalize BayesianPRM count log-likelihood by N for stable training."
+        },
     )
 
 @dataclass
@@ -1608,6 +1632,23 @@ def main():
     model.ensemble_prm_num_heads = int(model_args.ensemble_prm_num_heads)
     model.ensemble_prm_hidden_dim = int(model_args.ensemble_prm_hidden_dim)
     model.ensemble_prm_dropout = float(model_args.ensemble_prm_dropout)
+
+    # BayesianPRM belief-network hyperparameters.
+    model.config.belief_hidden_dim = model_args.belief_hidden_dim
+    model.config.belief_dropout = model_args.belief_dropout
+    model.config.belief_beta_kl = model_args.belief_beta_kl
+    model.config.belief_use_reward_probs = model_args.belief_use_reward_probs
+    model.config.belief_loglik_normalize_by_n = (
+        model_args.belief_loglik_normalize_by_n
+    )
+
+    model.belief_hidden_dim = int(model_args.belief_hidden_dim)
+    model.belief_dropout = float(model_args.belief_dropout)
+    model.belief_beta_kl = float(model_args.belief_beta_kl)
+    model.belief_use_reward_probs = bool(model_args.belief_use_reward_probs)
+    model.belief_loglik_normalize_by_n = bool(
+        model_args.belief_loglik_normalize_by_n
+    )
 
     if model_args.prm_loss_type == 'ensemble_prm':
         if not hasattr(model, 'init_ensemble_prm_head'):

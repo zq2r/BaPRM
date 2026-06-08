@@ -30,7 +30,7 @@ from internvl.model.phi3.modeling_phi3 import Phi3ForCausalLM
 from .configuration_internvl_chat import InternVLChatConfig
 from .modeling_intern_vit import InternVisionModel, has_flash_attn
 from .ensemble_prm_head import EnsembleScalarRewardHead
-
+from .bayesian_prm_head import BayesianBeliefHead
 
 logger = logging.get_logger(__name__)
 
@@ -157,11 +157,15 @@ class InternVLChatModel(PreTrainedModel):
         self.ensemble_prm_hidden_dim = int(getattr(config, "ensemble_prm_hidden_dim", 128))
         self.ensemble_prm_dropout = float(getattr(config, "ensemble_prm_dropout", 0.0))
         self.ensemble_prm_head = None
+        self.belief_head = None
         
         self.reset_kappa_head(self.beta_binom_kappa_init)
         
         if self.prm_loss_type == "ensemble_prm":
             self.init_ensemble_prm_head()
+
+        if self.prm_loss_type == "bayesian_prm":
+            self.init_belief_head()
 
         if config.use_backbone_lora:
             self.wrap_backbone_lora(
@@ -268,6 +272,44 @@ class InternVLChatModel(PreTrainedModel):
             pass
 
         return self.ensemble_prm_head
+    
+    def init_belief_head(self, force_reinit: bool = False):
+        """
+        Initialize the BayesianPRM belief head.
+
+        The belief head is trained after the ensemble PRM has been trained and frozen.
+        It predicts q_phi(z=m | c) over frozen ensemble reward heads.
+        """
+        if self.belief_head is not None and not force_reinit:
+            return self.belief_head
+
+        hidden_size = getattr(
+            self.language_model.config,
+            "hidden_size",
+            self.config.llm_config.hidden_size,
+        )
+
+        self.belief_head = BayesianBeliefHead(
+            hidden_size=hidden_size,
+            num_heads=self.ensemble_prm_num_heads,
+            belief_hidden_dim=self.belief_hidden_dim,
+            dropout=self.belief_dropout,
+            use_reward_probs=self.belief_use_reward_probs,
+        )
+
+        # If the base model has already been moved to a device/dtype, move the
+        # new head accordingly. Avoid touching meta tensors during ZeRO-3 init.
+        try:
+            ref_param = next(self.language_model.parameters())
+            if not getattr(ref_param, "is_meta", False):
+                self.belief_head.to(
+                    device=ref_param.device,
+                    dtype=ref_param.dtype,
+                )
+        except StopIteration:
+            pass
+
+        return self.belief_head
 
     def reset_kappa_head(self, kappa_init: float):
         # Initialize so that kappa ~= kappa_init at start; keep weights at 0 to start from a constant kappa.
@@ -378,7 +420,8 @@ class InternVLChatModel(PreTrainedModel):
             and loss_weight is None
             and (
                 (prm_counts_k is not None and prm_counts_n is not None)
-                or getattr(self, "prm_loss_type", "beta_binom") == "ensemble_prm"
+                or getattr(self, "prm_loss_type", "beta_binom")
+                in ("ensemble_prm", "bayesian_prm")
             )
         )
 
