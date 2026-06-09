@@ -210,6 +210,58 @@ def attach_kappa_head_grad_multiplier(model, mult: float):
     model._kappa_head_grad_hooks = handles
 
 
+def reinit_ensemble_heads_except_one(model, keep_idx: int = 0):
+    head = model.ensemble_prm_head
+    if head is None:
+        raise RuntimeError('ensemble_prm_head is None; cannot reinit heads.')
+
+    num_heads = int(head.num_heads)
+    if keep_idx < 0 or keep_idx >= num_heads:
+        raise ValueError(f'keep_idx={keep_idx} out of range [0, {num_heads})')
+
+    params = [head.w1, head.b1, head.w2, head.b2]
+
+    # Under DeepSpeed ZeRO-3, parameters are partitioned. Some ranks may see
+    # local shards with shape [0, ...], so direct indexing like head.w1[i]
+    # can fail. Gather full parameters before modifying selected heads.
+    try:
+        import deepspeed
+
+        with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
+            if (
+                (not dist.is_available())
+                or (not dist.is_initialized())
+                or dist.get_rank() == 0
+            ):
+                with torch.no_grad():
+                    for i in range(num_heads):
+                        if i == keep_idx:
+                            continue
+
+                        torch.nn.init.xavier_uniform_(head.w1.data[i])
+                        torch.nn.init.xavier_uniform_(head.w2.data[i])
+                        head.b1.data[i].zero_()
+                        head.b2.data[i].zero_()
+    except Exception as e:
+        # Fallback for non-ZeRO or normal single-process training.
+        # If this fallback fails under ZeRO-3, re-raise the original error.
+        if head.w1.shape[0] == 0:
+            raise RuntimeError(
+                'Failed to gather ZeRO-3 partitioned ensemble_prm_head '
+                'parameters before reinitialization.'
+            ) from e
+
+        with torch.no_grad():
+            for i in range(num_heads):
+                if i == keep_idx:
+                    continue
+
+                torch.nn.init.xavier_uniform_(head.w1.data[i])
+                torch.nn.init.xavier_uniform_(head.w2.data[i])
+                head.b1.data[i].zero_()
+                head.b2.data[i].zero_()
+
+
 @dataclass
 class ModelArguments:
     """
@@ -339,6 +391,21 @@ class ModelArguments:
         default=True,
         metadata={
             "help": "Normalize BayesianPRM count log-likelihood by N for stable training."
+        },
+    )
+    bayesian_reinit_other_ensemble_heads: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Debug only. In bayesian_prm training, keep one loaded ensemble "
+                "head and reinitialize all other ensemble heads."
+            )
+        },
+    )
+    bayesian_keep_ensemble_head_idx: int = field(
+        default=0,
+        metadata={
+            "help": "Which loaded ensemble head to keep when debug reinitializing others."
         },
     )
 
@@ -1671,6 +1738,18 @@ def main():
                 "InternVLChatModel.init_belief_head()."
             )
         model.init_belief_head(force_reinit=False)
+
+        if getattr(model_args, 'bayesian_reinit_other_ensemble_heads', False):
+            keep_idx = int(
+                getattr(model_args, 'bayesian_keep_ensemble_head_idx', 0)
+            )
+            reinit_ensemble_heads_except_one(model, keep_idx=keep_idx)
+
+            if dist.get_rank() == 0:
+                logger.info(
+                    f'BayesianPRM debug: kept ensemble head {keep_idx}, '
+                    'reinitialized all other ensemble heads.'
+                )
 
     if dist.get_rank() == 0:
         logger.info(f'Using PRM loss type: {model_args.prm_loss_type}')
