@@ -156,6 +156,7 @@ class InternVLChatModel(PreTrainedModel):
         self.ensemble_prm_num_heads = int(getattr(config, "ensemble_prm_num_heads", 8))
         self.ensemble_prm_hidden_dim = int(getattr(config, "ensemble_prm_hidden_dim", 128))
         self.ensemble_prm_dropout = float(getattr(config, "ensemble_prm_dropout", 0.0))
+        self.ensemble_prm_bootstrap_prob = float(getattr(config, "ensemble_prm_bootstrap_prob", 1.0))
         self.ensemble_prm_head = None
         
         # BayesianPRM belief-network settings. These are only used when
@@ -593,26 +594,49 @@ class InternVLChatModel(PreTrainedModel):
                     # target_expand: [E, M]
                     target_expand = target[None, :].expand_as(ensemble_logits)
 
-                    cls_loss = F.binary_cross_entropy_with_logits(
+                    # loss_per_head: [E, M]
+                    loss_per_head = F.binary_cross_entropy_with_logits(
                         ensemble_logits.float(),
                         target_expand.float(),
-                        reduction="mean",
+                        reduction="none",
                     )
+
+                    bootstrap_prob = float(getattr(self, "ensemble_prm_bootstrap_prob", 1.0))
+
+                    if self.training and bootstrap_prob < 1.0:
+                        bootstrap_mask = (
+                            torch.rand_like(loss_per_head.float()) < bootstrap_prob
+                        ).float()
+
+                        denom = bootstrap_mask.sum().clamp_min(1.0)
+                        cls_loss = (loss_per_head.float() * bootstrap_mask).sum() / denom
+                    else:
+                        bootstrap_mask = None
+                        cls_loss = loss_per_head.mean()
 
                     loss = cls_loss
 
                     with torch.no_grad():
                         ensemble_probs = torch.sigmoid(ensemble_logits.float())  # [E, M]
-                        reward_mean = ensemble_probs.mean(dim=0)                 # [M]
-                        reward_std = ensemble_probs.std(dim=0, unbiased=False)   # [M]
+                        reward_mean = ensemble_probs.mean(dim=0)  # [M]
+                        reward_std = ensemble_probs.std(dim=0, unbiased=False)  # [M]
 
-                        self._beta_last_stats = {
+                        stats = {
                             "ensemble_prm_loss": float(cls_loss.detach().item()),
                             "ensemble_reward_mean": float(reward_mean.mean().detach().item()),
                             "ensemble_reward_std": float(reward_std.mean().detach().item()),
                             "ensemble_target_mean": float(target.mean().detach().item()),
+                            "ensemble_bootstrap_prob": float(bootstrap_prob),
                             "valid_prm_count": float(prm_h.size(0)),
                         }
+
+                        if bootstrap_mask is not None:
+                            stats["ensemble_bootstrap_keep_ratio"] = float(
+                                bootstrap_mask.mean().detach().item()
+                            )
+
+                        self._beta_last_stats = stats
+
             elif use_bayesian_prm:
                 if prm_counts_k is None or prm_counts_n is None:
                     raise RuntimeError(

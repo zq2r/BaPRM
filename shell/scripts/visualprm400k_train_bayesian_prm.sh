@@ -55,6 +55,7 @@ mkdir -p "${BAYESIAN_OUTPUT_DIR}"
 ENSEMBLE_PRM_NUM_HEADS=${ENSEMBLE_PRM_NUM_HEADS:-5}
 ENSEMBLE_PRM_HIDDEN_DIM=${ENSEMBLE_PRM_HIDDEN_DIM:-256}
 ENSEMBLE_PRM_DROPOUT=${ENSEMBLE_PRM_DROPOUT:-0.0}
+ENSEMBLE_PRM_BOOTSTRAP_PROB=${ENSEMBLE_PRM_BOOTSTRAP_PROB:-1.0}
 
 # =========================
 # Bayesian belief hyperparameters
@@ -154,6 +155,7 @@ if [ "${LOAD_ENSEMBLE_CHECKPOINT}" = "0" ]; then
   ENSEMBLE_PRM_NUM_HEADS="${ENSEMBLE_PRM_NUM_HEADS}" \
   ENSEMBLE_PRM_HIDDEN_DIM="${ENSEMBLE_PRM_HIDDEN_DIM}" \
   ENSEMBLE_PRM_DROPOUT="${ENSEMBLE_PRM_DROPOUT}" \
+  ENSEMBLE_PRM_BOOTSTRAP_PROB="${ENSEMBLE_PRM_BOOTSTRAP_PROB}" \
   bash "${REPO_ROOT}/shell/scripts/visualprm400k_train_ensemble_prm.sh"
 
   echo "========== Stage 1 finished =========="
@@ -306,4 +308,32 @@ python -m torch.distributed.run \
   --deepspeed "${DEEPSPEED_CONFIG}" \
   --report_to "wandb" \
   --run_name "${WANDB_NAME}" \
-  2>&1 | tee "${BAYESIAN_OUTPUT_DIR}/training_log.txt"
+  2>&1 | python -u -c '
+import sys
+from collections import deque
+from pathlib import Path
+
+log_file = Path(sys.argv[1])
+max_lines = int(sys.argv[2])
+flush_interval = int(sys.argv[3])
+
+buf = deque(maxlen=max_lines)
+log_file.parent.mkdir(parents=True, exist_ok=True)
+log_file.write_text("", encoding="utf-8")
+
+def dump():
+    tmp = log_file.with_suffix(log_file.suffix + ".tmp")
+    tmp.write_text("".join(buf), encoding="utf-8")
+    tmp.replace(log_file)
+
+for i, line in enumerate(sys.stdin, 1):
+    sys.stdout.write(line)
+    sys.stdout.flush()
+
+    buf.append(line)
+
+    if i % flush_interval == 0:
+        dump()
+
+dump()
+' "${OUTPUT_DIR}/training_log.txt" 1000 100

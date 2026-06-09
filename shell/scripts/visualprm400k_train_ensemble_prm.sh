@@ -26,6 +26,7 @@ SAVE_ONLY_MODEL=${SAVE_ONLY_MODEL:-True}
 ENSEMBLE_PRM_NUM_HEADS=${ENSEMBLE_PRM_NUM_HEADS:-5}
 ENSEMBLE_PRM_HIDDEN_DIM=${ENSEMBLE_PRM_HIDDEN_DIM:-256}
 ENSEMBLE_PRM_DROPOUT=${ENSEMBLE_PRM_DROPOUT:-0.0}
+ENSEMBLE_PRM_BOOTSTRAP_PROB=${ENSEMBLE_PRM_BOOTSTRAP_PROB:-0.5}
 
 # Use repo-relative log dir by default.
 OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/log/ensemble-${model_name}-visualprm400k"}
@@ -186,6 +187,7 @@ python -m torch.distributed.run \
   --ensemble_prm_num_heads ${ENSEMBLE_PRM_NUM_HEADS} \
   --ensemble_prm_hidden_dim ${ENSEMBLE_PRM_HIDDEN_DIM} \
   --ensemble_prm_dropout ${ENSEMBLE_PRM_DROPOUT} \
+  --ensemble_prm_bootstrap_prob ${ENSEMBLE_PRM_BOOTSTRAP_PROB} \
   --beta_binom_kappa_min ${BETA_BINOM_KAPPA_MIN} \
   --beta_binom_kappa_init ${BETA_BINOM_KAPPA_INIT} \
   --beta_binom_evi_reg ${BETA_BINOM_EVI_REG} \

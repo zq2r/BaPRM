@@ -341,6 +341,15 @@ class ModelArguments:
             "help": "Normalize BayesianPRM count log-likelihood by N for stable training."
         },
     )
+    ensemble_prm_bootstrap_prob: float = field(
+        default=1.0,
+        metadata={
+            "help": (
+                "Head-wise bootstrap keep probability for ensemble PRM training. "
+                "1.0 disables bootstrap."
+            )
+        },
+    )
 
 @dataclass
 class DataTrainingArguments:
@@ -1633,6 +1642,9 @@ def main():
     model.ensemble_prm_num_heads = int(model_args.ensemble_prm_num_heads)
     model.ensemble_prm_hidden_dim = int(model_args.ensemble_prm_hidden_dim)
     model.ensemble_prm_dropout = float(model_args.ensemble_prm_dropout)
+    
+    model.config.ensemble_prm_bootstrap_prob = model_args.ensemble_prm_bootstrap_prob
+    model.ensemble_prm_bootstrap_prob = float(model_args.ensemble_prm_bootstrap_prob)
 
     # BayesianPRM belief-network hyperparameters.
     model.config.belief_hidden_dim = model_args.belief_hidden_dim
