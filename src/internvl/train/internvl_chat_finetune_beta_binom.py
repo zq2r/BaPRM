@@ -1845,6 +1845,29 @@ def main():
             logger.info(f'Unfreezing ViT layer: {k}')
             v.requires_grad = True
 
+    if model_args.prm_loss_type == 'bayesian_prm':
+        if not hasattr(model, 'belief_head') or model.belief_head is None:
+            if not hasattr(model, 'init_belief_head'):
+                raise RuntimeError(
+                    "prm_loss_type='bayesian_prm' requires "
+                    "InternVLChatModel.init_belief_head()."
+                )
+            model.init_belief_head(force_reinit=False)
+
+        # Freeze everything first.
+        for param in model.parameters():
+            param.requires_grad = False
+
+        # Train only the belief network.
+        for param in model.belief_head.parameters():
+            param.requires_grad = True
+
+        if dist.get_rank() == 0:
+            logger.info(
+                "BayesianPRM mode: froze all base/reward parameters and "
+                "enabled training only for belief_head."
+            )
+
     # print trainable parameters
     if dist.get_rank() == 0:
         for name, param in model.named_parameters():

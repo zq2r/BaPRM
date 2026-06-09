@@ -13,8 +13,8 @@ export HF_DATASETS_OFFLINE=1
 # hyperparameters needed to specify
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3"}
 GPUS=${GPUS:-4}
-model_name=${model_name:-"InternVL2_5-8B"}
-export MASTER_PORT=${MASTER_PORT:-4320}
+model_name=${model_name:-"InternVL3-8B"}
+export MASTER_PORT=${MASTER_PORT:-4319}
 RESUME_TRAINING=${RESUME_TRAINING:-0}
 SAVE_ONLY_MODEL=${SAVE_ONLY_MODEL:-True}
 
@@ -132,13 +132,13 @@ python -m torch.distributed.run \
   --gradient_accumulation_steps ${GRADIENT_ACC} \
   --save_strategy "steps" \
   --save_only_model ${SAVE_ONLY_MODEL} \
-  --save_steps 500 \
+  --save_steps 100 \
   --save_total_limit 1 \
   --learning_rate 1e-5 \
   --weight_decay 0.05 \
   --warmup_ratio 0.05 \
   --lr_scheduler_type "cosine" \
-  --logging_steps 100 \
+  --logging_steps 1 \
   --max_seq_length 8192 \
   --prm_loss_type normal_prm \
   --beta_binom_kappa_min ${BETA_BINOM_KAPPA_MIN} \
