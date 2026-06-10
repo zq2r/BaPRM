@@ -14,12 +14,15 @@ export TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
 export HF_DATASETS_OFFLINE=${HF_DATASETS_OFFLINE:-1}
 
 # =========================
-# Basic configs
+# Common configs
 # =========================
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3"}
 GPUS=${GPUS:-4}
 model_name=${model_name:-"InternVL3-8B"}
 export MASTER_PORT=${MASTER_PORT:-4320}
+
+ENSEMBLE_PRM_BOOTSTRAP_PROB=${ENSEMBLE_PRM_BOOTSTRAP_PROB:-0.5}
+BELIEF_BETA_KL=${BELIEF_BETA_KL:-0.05}
 
 # Whether to skip ensemble training.
 # 0: train ensemble first, then train belief network.
@@ -55,14 +58,13 @@ mkdir -p "${BAYESIAN_OUTPUT_DIR}"
 ENSEMBLE_PRM_NUM_HEADS=${ENSEMBLE_PRM_NUM_HEADS:-5}
 ENSEMBLE_PRM_HIDDEN_DIM=${ENSEMBLE_PRM_HIDDEN_DIM:-256}
 ENSEMBLE_PRM_DROPOUT=${ENSEMBLE_PRM_DROPOUT:-0.0}
-ENSEMBLE_PRM_BOOTSTRAP_PROB=${ENSEMBLE_PRM_BOOTSTRAP_PROB:-1.0}
+
 
 # =========================
 # Bayesian belief hyperparameters
 # =========================
 BELIEF_HIDDEN_DIM=${BELIEF_HIDDEN_DIM:-256}
 BELIEF_DROPOUT=${BELIEF_DROPOUT:-0.0}
-BELIEF_BETA_KL=${BELIEF_BETA_KL:-0.1}
 BELIEF_USE_REWARD_PROBS=${BELIEF_USE_REWARD_PROBS:-True}
 BELIEF_LOGLIK_NORMALIZE_BY_N=${BELIEF_LOGLIK_NORMALIZE_BY_N:-True}
 
@@ -336,4 +338,4 @@ for i, line in enumerate(sys.stdin, 1):
         dump()
 
 dump()
-' "${OUTPUT_DIR}/training_log.txt" 1000 100
+' "${ENSEMBLE_OUTPUT_DIR}/training_log.txt" 1000 100
