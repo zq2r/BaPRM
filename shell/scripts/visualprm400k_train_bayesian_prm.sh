@@ -61,7 +61,7 @@ ENSEMBLE_PRM_DROPOUT=${ENSEMBLE_PRM_DROPOUT:-0.0}
 # =========================
 BELIEF_HIDDEN_DIM=${BELIEF_HIDDEN_DIM:-256}
 BELIEF_DROPOUT=${BELIEF_DROPOUT:-0.0}
-BELIEF_BETA_KL=${BELIEF_BETA_KL:-0.1}
+BELIEF_BETA_KL=${BELIEF_BETA_KL:-0.01}
 BELIEF_USE_REWARD_PROBS=${BELIEF_USE_REWARD_PROBS:-True}
 BELIEF_LOGLIK_NORMALIZE_BY_N=${BELIEF_LOGLIK_NORMALIZE_BY_N:-True}
 BAYESIAN_REINIT_OTHER_ENSEMBLE_HEADS=${BAYESIAN_REINIT_OTHER_ENSEMBLE_HEADS:-True}
@@ -312,4 +312,32 @@ python -m torch.distributed.run \
   --deepspeed "${DEEPSPEED_CONFIG}" \
   --report_to "wandb" \
   --run_name "${WANDB_NAME}" \
-  2>&1 | tee "${BAYESIAN_OUTPUT_DIR}/training_log.txt"
+  2>&1 | python -u -c '
+import sys
+from collections import deque
+from pathlib import Path
+
+log_file = Path(sys.argv[1])
+max_lines = int(sys.argv[2])
+flush_interval = int(sys.argv[3])
+
+buf = deque(maxlen=max_lines)
+log_file.parent.mkdir(parents=True, exist_ok=True)
+log_file.write_text("", encoding="utf-8")
+
+def dump():
+    tmp = log_file.with_suffix(log_file.suffix + ".tmp")
+    tmp.write_text("".join(buf), encoding="utf-8")
+    tmp.replace(log_file)
+
+for i, line in enumerate(sys.stdin, 1):
+    sys.stdout.write(line)
+    sys.stdout.flush()
+
+    buf.append(line)
+
+    if i % flush_interval == 0:
+        dump()
+
+dump()
+' "${BAYESIAN_OUTPUT_DIR}/training_log.txt" 1000 100
