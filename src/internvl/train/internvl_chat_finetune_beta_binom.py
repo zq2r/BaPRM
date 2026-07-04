@@ -302,7 +302,8 @@ class ModelArguments:
     prm_loss_type: str = field(
         default="beta_binom",
         metadata={
-            "help": "PRM loss type: beta_binom, normal_prm, or ensemble_prm."
+            "help": "PRM loss type: beta_binom, normal_prm, "
+            "ensemble_prm, or bayesian_prm."
         },
     )
     ensemble_prm_num_heads: int = field(
@@ -347,6 +348,24 @@ class ModelArguments:
             "help": (
                 "Head-wise bootstrap keep probability for ensemble PRM training. "
                 "1.0 disables bootstrap."
+            )
+        },
+    )
+    ensemble_prm_use_prior_network: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Whether to add a frozen randomized prior network to "
+                "the ensemble PRM head."
+            )
+        },
+    )
+    ensemble_prm_prior_scale: float = field(
+        default=1.0,
+        metadata={
+            "help": (
+                "Scale of the frozen randomized prior logits in ensemble PRM. "
+                "Final logit = learned_logit + prior_scale * prior_logit."
             )
         },
     )
@@ -1638,10 +1657,18 @@ def main():
     model.config.ensemble_prm_num_heads = model_args.ensemble_prm_num_heads
     model.config.ensemble_prm_hidden_dim = model_args.ensemble_prm_hidden_dim
     model.config.ensemble_prm_dropout = model_args.ensemble_prm_dropout
+    model.config.ensemble_prm_use_prior_network = (
+    model_args.ensemble_prm_use_prior_network
+    )
+    model.config.ensemble_prm_prior_scale = model_args.ensemble_prm_prior_scale
 
     model.ensemble_prm_num_heads = int(model_args.ensemble_prm_num_heads)
     model.ensemble_prm_hidden_dim = int(model_args.ensemble_prm_hidden_dim)
     model.ensemble_prm_dropout = float(model_args.ensemble_prm_dropout)
+    model.ensemble_prm_use_prior_network = bool(
+    model_args.ensemble_prm_use_prior_network
+    )
+    model.ensemble_prm_prior_scale = float(model_args.ensemble_prm_prior_scale)
     
     model.config.ensemble_prm_bootstrap_prob = model_args.ensemble_prm_bootstrap_prob
     model.ensemble_prm_bootstrap_prob = float(model_args.ensemble_prm_bootstrap_prob)
@@ -1672,9 +1699,27 @@ def main():
         model.init_ensemble_prm_head(force_reinit=False)
 
     if model_args.prm_loss_type == 'ensemble_prm':
-        # Make sure the ensemble head is trainable in ensemble PRM training.
-        for p in model.ensemble_prm_head.parameters():
-            p.requires_grad = True
+        # Make sure only the learned ensemble branch is trainable.
+        if hasattr(model.ensemble_prm_head, "learned_parameters"):
+            for p in model.ensemble_prm_head.learned_parameters():
+                p.requires_grad = True
+        else:
+            # Backward-compatible fallback for old EnsembleScalarRewardHead.
+            for p in model.ensemble_prm_head.parameters():
+                p.requires_grad = True
+
+        # Keep the randomized prior branch frozen.
+        if hasattr(model.ensemble_prm_head, "freeze_prior_network"):
+            model.ensemble_prm_head.freeze_prior_network()
+
+        if (
+            getattr(model.ensemble_prm_head, "use_prior_network", False)
+            and hasattr(model.ensemble_prm_head, "prior_is_frozen")
+        ):
+            assert model.ensemble_prm_head.prior_is_frozen(), (
+                "Ensemble prior network should be frozen, but some prior "
+                "parameters are trainable."
+            )
 
     if model_args.prm_loss_type == 'bayesian_prm':
         if not hasattr(model, 'init_belief_head'):
@@ -1692,6 +1737,8 @@ def main():
                 f'num_heads={model_args.ensemble_prm_num_heads}, '
                 f'hidden_dim={model_args.ensemble_prm_hidden_dim}, '
                 f'dropout={model_args.ensemble_prm_dropout}'
+                f'use_prior_network={model_args.ensemble_prm_use_prior_network}, '
+                f'prior_scale={model_args.ensemble_prm_prior_scale}'
             )
 
     

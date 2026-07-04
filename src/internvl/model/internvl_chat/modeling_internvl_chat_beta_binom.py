@@ -156,6 +156,8 @@ class InternVLChatModel(PreTrainedModel):
         self.ensemble_prm_num_heads = int(getattr(config, "ensemble_prm_num_heads", 8))
         self.ensemble_prm_hidden_dim = int(getattr(config, "ensemble_prm_hidden_dim", 128))
         self.ensemble_prm_dropout = float(getattr(config, "ensemble_prm_dropout", 0.0))
+        self.ensemble_prm_use_prior_network = bool(getattr(config, "ensemble_prm_use_prior_network", False))
+        self.ensemble_prm_prior_scale = float(getattr(config, "ensemble_prm_prior_scale", 1.0))
         self.ensemble_prm_bootstrap_prob = float(getattr(config, "ensemble_prm_bootstrap_prob", 1.0))
         self.ensemble_prm_head = None
         
@@ -268,6 +270,8 @@ class InternVLChatModel(PreTrainedModel):
             num_heads=self.ensemble_prm_num_heads,
             hidden_dim=self.ensemble_prm_hidden_dim,
             dropout=self.ensemble_prm_dropout,
+            use_prior_network=self.ensemble_prm_use_prior_network,
+            prior_scale=self.ensemble_prm_prior_scale,
         )
 
         # If the base model has already been moved to a device/dtype, move the
@@ -281,6 +285,9 @@ class InternVLChatModel(PreTrainedModel):
                 )
         except StopIteration:
             pass
+
+        if hasattr(self.ensemble_prm_head, "freeze_prior_network"):
+            self.ensemble_prm_head.freeze_prior_network()
 
         return self.ensemble_prm_head
     
