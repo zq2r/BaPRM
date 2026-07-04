@@ -17,7 +17,7 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3"}
 GPUS=${GPUS:-4}
 model_name=${model_name:-"InternVL3-8B"}
 export MASTER_PORT=${MASTER_PORT:-4325}
-ENSEMBLE_PRM_BOOTSTRAP_PROB=${ENSEMBLE_PRM_BOOTSTRAP_PROB:-0.5}
+ENSEMBLE_PRM_BOOTSTRAP_PROB=${ENSEMBLE_PRM_BOOTSTRAP_PROB:-1.0}
 RESUME_TRAINING=${RESUME_TRAINING:-0}
 SAVE_ONLY_MODEL=${SAVE_ONLY_MODEL:-True}
 
@@ -27,10 +27,18 @@ SAVE_ONLY_MODEL=${SAVE_ONLY_MODEL:-True}
 ENSEMBLE_PRM_NUM_HEADS=${ENSEMBLE_PRM_NUM_HEADS:-5}
 ENSEMBLE_PRM_HIDDEN_DIM=${ENSEMBLE_PRM_HIDDEN_DIM:-256}
 ENSEMBLE_PRM_DROPOUT=${ENSEMBLE_PRM_DROPOUT:-0.0}
-
+ENSEMBLE_PRM_USE_PRIOR_NETWORK=${ENSEMBLE_PRM_USE_PRIOR_NETWORK:-False}
+ENSEMBLE_PRM_PRIOR_SCALE=${ENSEMBLE_PRM_PRIOR_SCALE:-1.0}
 
 # Use repo-relative log dir by default.
-OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/log/ensemble-${model_name}-visualprm400k"}
+if [ "${ENSEMBLE_PRM_USE_PRIOR_NETWORK}" = "True" ] || [ "${ENSEMBLE_PRM_USE_PRIOR_NETWORK}" = "true" ]; then
+  DEFAULT_OUTPUT_DIR="${REPO_ROOT}/log/ensemble-prior-${model_name}-visualprm400k"
+else
+  DEFAULT_OUTPUT_DIR="${REPO_ROOT}/log/ensemble-${model_name}-visualprm400k"
+fi
+
+OUTPUT_DIR=${OUTPUT_DIR:-"${DEFAULT_OUTPUT_DIR}"}
+
 
 if [ ! -d "$OUTPUT_DIR" ]; then
   mkdir -p "$OUTPUT_DIR"
@@ -62,11 +70,22 @@ fi
 # =========================
 export WANDB_MODE=${WANDB_MODE:-offline}
 export WANDB_PROJECT=${WANDB_PROJECT:-"Beta-PRM"}
-export WANDB_NAME=${WANDB_NAME:-"ensemble-${model_name}-visualprm400k"}
-export WANDB_RUN_GROUP=${WANDB_RUN_GROUP:-"ensemble-${model_name}"}
-export WANDB_TAGS=${WANDB_TAGS:-"visualprm400k"}
 export WANDB_DIR=${WANDB_DIR:-"${OUTPUT_DIR}/wandb"}
 mkdir -p "${WANDB_DIR}"
+
+if [ "${ENSEMBLE_PRM_USE_PRIOR_NETWORK}" = "True" ] || [ "${ENSEMBLE_PRM_USE_PRIOR_NETWORK}" = "true" ]; then
+  DEFAULT_WANDB_NAME="ensemble-prior-${model_name}-visualprm400k"
+  DEFAULT_WANDB_RUN_GROUP="ensemble-prior-${model_name}"
+  DEFAULT_WANDB_TAGS="visualprm400k,ensemble_prior"
+else
+  DEFAULT_WANDB_NAME="ensemble-${model_name}-visualprm400k"
+  DEFAULT_WANDB_RUN_GROUP="ensemble-${model_name}"
+  DEFAULT_WANDB_TAGS="visualprm400k"
+fi
+
+export WANDB_NAME=${WANDB_NAME:-"${DEFAULT_WANDB_NAME}"}
+export WANDB_RUN_GROUP=${WANDB_RUN_GROUP:-"${DEFAULT_WANDB_RUN_GROUP}"}
+export WANDB_TAGS=${WANDB_TAGS:-"${DEFAULT_WANDB_TAGS}"}
 
 # =========================
 # Batch / data / model paths
@@ -141,6 +160,8 @@ echo "PRM_LOSS_TYPE: ensemble_prm"
 echo "ENSEMBLE_PRM_NUM_HEADS: ${ENSEMBLE_PRM_NUM_HEADS}"
 echo "ENSEMBLE_PRM_HIDDEN_DIM: ${ENSEMBLE_PRM_HIDDEN_DIM}"
 echo "ENSEMBLE_PRM_DROPOUT: ${ENSEMBLE_PRM_DROPOUT}"
+echo "ENSEMBLE_PRM_USE_PRIOR_NETWORK: ${ENSEMBLE_PRM_USE_PRIOR_NETWORK}"
+echo "ENSEMBLE_PRM_PRIOR_SCALE: ${ENSEMBLE_PRM_PRIOR_SCALE}"
 echo "WANDB_PROJECT: ${WANDB_PROJECT}"
 echo "WANDB_NAME: ${WANDB_NAME}"
 echo "WANDB_RUN_GROUP: ${WANDB_RUN_GROUP}"
@@ -188,6 +209,8 @@ python -m torch.distributed.run \
   --ensemble_prm_num_heads ${ENSEMBLE_PRM_NUM_HEADS} \
   --ensemble_prm_hidden_dim ${ENSEMBLE_PRM_HIDDEN_DIM} \
   --ensemble_prm_dropout ${ENSEMBLE_PRM_DROPOUT} \
+  --ensemble_prm_use_prior_network ${ENSEMBLE_PRM_USE_PRIOR_NETWORK} \
+  --ensemble_prm_prior_scale ${ENSEMBLE_PRM_PRIOR_SCALE} \
   --ensemble_prm_bootstrap_prob ${ENSEMBLE_PRM_BOOTSTRAP_PROB} \
   --beta_binom_kappa_min ${BETA_BINOM_KAPPA_MIN} \
   --beta_binom_kappa_init ${BETA_BINOM_KAPPA_INIT} \
