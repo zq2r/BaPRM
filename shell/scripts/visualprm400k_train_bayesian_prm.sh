@@ -6,6 +6,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
+is_true() {
+  local value="${1:-False}"
+  [ "${value}" = "True" ] || [ "${value}" = "true" ] || [ "${value}" = "1" ]
+}
+
 # =========================
 # Offline setting
 # =========================
@@ -18,11 +23,16 @@ export HF_DATASETS_OFFLINE=${HF_DATASETS_OFFLINE:-1}
 # =========================
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3"}
 GPUS=${GPUS:-4}
-model_name=${model_name:-"InternVL3-8B"}
+model_name=${model_name:-"InternVL3-2B"}
 export MASTER_PORT=${MASTER_PORT:-4320}
 
 ENSEMBLE_PRM_BOOTSTRAP_PROB=${ENSEMBLE_PRM_BOOTSTRAP_PROB:-0.5}
 BELIEF_BETA_KL=${BELIEF_BETA_KL:-0.05}
+
+# Prior-network switch must be defined before default paths,
+# because output directory names depend on it.
+ENSEMBLE_PRM_USE_PRIOR_NETWORK=${ENSEMBLE_PRM_USE_PRIOR_NETWORK:-True}
+ENSEMBLE_PRM_PRIOR_SCALE=${ENSEMBLE_PRM_PRIOR_SCALE:-1.0}
 
 # Whether to skip ensemble training.
 # 0: train ensemble first, then train belief network.
@@ -38,8 +48,16 @@ SAVE_ONLY_MODEL=${SAVE_ONLY_MODEL:-True}
 # =========================
 # Paths
 # =========================
-ENSEMBLE_OUTPUT_DIR=${ENSEMBLE_OUTPUT_DIR:-"${REPO_ROOT}/log/ensemble-${model_name}-visualprm400k"}
-BAYESIAN_OUTPUT_DIR=${BAYESIAN_OUTPUT_DIR:-"${REPO_ROOT}/log/bayesian-${model_name}-visualprm400k"}
+if is_true "${ENSEMBLE_PRM_USE_PRIOR_NETWORK}"; then
+  DEFAULT_ENSEMBLE_OUTPUT_DIR="${REPO_ROOT}/log/ensemble-prior-${model_name}-visualprm400k"
+  DEFAULT_BAYESIAN_OUTPUT_DIR="${REPO_ROOT}/log/bayesian-prior-${model_name}-visualprm400k"
+else
+  DEFAULT_ENSEMBLE_OUTPUT_DIR="${REPO_ROOT}/log/ensemble-${model_name}-visualprm400k"
+  DEFAULT_BAYESIAN_OUTPUT_DIR="${REPO_ROOT}/log/bayesian-${model_name}-visualprm400k"
+fi
+
+ENSEMBLE_OUTPUT_DIR=${ENSEMBLE_OUTPUT_DIR:-"${DEFAULT_ENSEMBLE_OUTPUT_DIR}"}
+BAYESIAN_OUTPUT_DIR=${BAYESIAN_OUTPUT_DIR:-"${DEFAULT_BAYESIAN_OUTPUT_DIR}"}
 
 # Optional explicit ensemble checkpoint.
 # If empty, the script will search latest checkpoint under ENSEMBLE_OUTPUT_DIR.
@@ -58,9 +76,6 @@ mkdir -p "${BAYESIAN_OUTPUT_DIR}"
 ENSEMBLE_PRM_NUM_HEADS=${ENSEMBLE_PRM_NUM_HEADS:-5}
 ENSEMBLE_PRM_HIDDEN_DIM=${ENSEMBLE_PRM_HIDDEN_DIM:-256}
 ENSEMBLE_PRM_DROPOUT=${ENSEMBLE_PRM_DROPOUT:-0.0}
-ENSEMBLE_PRM_USE_PRIOR_NETWORK=${ENSEMBLE_PRM_USE_PRIOR_NETWORK:-False}
-ENSEMBLE_PRM_PRIOR_SCALE=${ENSEMBLE_PRM_PRIOR_SCALE:-1.0}
-
 
 # =========================
 # Bayesian belief hyperparameters
@@ -134,6 +149,27 @@ if [ -n "${MAX_STEPS}" ]; then
 fi
 
 # =========================
+# Default WandB names
+# =========================
+if is_true "${ENSEMBLE_PRM_USE_PRIOR_NETWORK}"; then
+  DEFAULT_ENSEMBLE_WANDB_NAME="ensemble-prior-${model_name}-visualprm400k"
+  DEFAULT_ENSEMBLE_WANDB_RUN_GROUP="ensemble-prior-${model_name}"
+  DEFAULT_ENSEMBLE_WANDB_TAGS="visualprm400k,ensemble,ensemble_prior"
+
+  DEFAULT_BAYESIAN_WANDB_NAME="bayesian-prior-${model_name}-visualprm400k"
+  DEFAULT_BAYESIAN_WANDB_RUN_GROUP="bayesian-prior-${model_name}"
+  DEFAULT_BAYESIAN_WANDB_TAGS="visualprm400k,bayesian,ensemble_prior"
+else
+  DEFAULT_ENSEMBLE_WANDB_NAME="ensemble-${model_name}-visualprm400k"
+  DEFAULT_ENSEMBLE_WANDB_RUN_GROUP="ensemble-${model_name}"
+  DEFAULT_ENSEMBLE_WANDB_TAGS="visualprm400k,ensemble"
+
+  DEFAULT_BAYESIAN_WANDB_NAME="bayesian-${model_name}-visualprm400k"
+  DEFAULT_BAYESIAN_WANDB_RUN_GROUP="bayesian-${model_name}"
+  DEFAULT_BAYESIAN_WANDB_TAGS="visualprm400k,bayesian"
+fi
+
+# =========================
 # Stage 1: train or load ensemble PRM
 # =========================
 if [ "${LOAD_ENSEMBLE_CHECKPOINT}" = "0" ]; then
@@ -148,14 +184,15 @@ if [ "${LOAD_ENSEMBLE_CHECKPOINT}" = "0" ]; then
   MASTER_PORT="${MASTER_PORT}" \
   WANDB_MODE="${WANDB_MODE:-offline}" \
   WANDB_PROJECT="${WANDB_PROJECT:-Beta-PRM}" \
-  WANDB_NAME="${ENSEMBLE_WANDB_NAME:-ensemble-${model_name}-visualprm400k}" \
-  WANDB_RUN_GROUP="${ENSEMBLE_WANDB_RUN_GROUP:-ensemble-${model_name}}" \
-  WANDB_TAGS="${ENSEMBLE_WANDB_TAGS:-visualprm400k,ensemble}" \
+  WANDB_NAME="${ENSEMBLE_WANDB_NAME:-${DEFAULT_ENSEMBLE_WANDB_NAME}}" \
+  WANDB_RUN_GROUP="${ENSEMBLE_WANDB_RUN_GROUP:-${DEFAULT_ENSEMBLE_WANDB_RUN_GROUP}}" \
+  WANDB_TAGS="${ENSEMBLE_WANDB_TAGS:-${DEFAULT_ENSEMBLE_WANDB_TAGS}}" \
   META_PATH="${META_PATH}" \
   MODEL_PATH="${MODEL_PATH}" \
   DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG}" \
   BATCH_SIZE="${BATCH_SIZE}" \
   PER_DEVICE_BATCH_SIZE="${PER_DEVICE_BATCH_SIZE}" \
+  MAX_STEPS="${MAX_STEPS}" \
   ENSEMBLE_PRM_NUM_HEADS="${ENSEMBLE_PRM_NUM_HEADS}" \
   ENSEMBLE_PRM_HIDDEN_DIM="${ENSEMBLE_PRM_HIDDEN_DIM}" \
   ENSEMBLE_PRM_DROPOUT="${ENSEMBLE_PRM_DROPOUT}" \
@@ -219,9 +256,9 @@ fi
 # =========================
 export WANDB_MODE=${WANDB_MODE:-offline}
 export WANDB_PROJECT=${WANDB_PROJECT:-"Beta-PRM"}
-export WANDB_NAME=${BAYESIAN_WANDB_NAME:-"bayesian-${model_name}-visualprm400k"}
-export WANDB_RUN_GROUP=${BAYESIAN_WANDB_RUN_GROUP:-"bayesian-${model_name}"}
-export WANDB_TAGS=${BAYESIAN_WANDB_TAGS:-"visualprm400k,bayesian"}
+export WANDB_NAME=${BAYESIAN_WANDB_NAME:-"${DEFAULT_BAYESIAN_WANDB_NAME}"}
+export WANDB_RUN_GROUP=${BAYESIAN_WANDB_RUN_GROUP:-"${DEFAULT_BAYESIAN_WANDB_RUN_GROUP}"}
+export WANDB_TAGS=${BAYESIAN_WANDB_TAGS:-"${DEFAULT_BAYESIAN_WANDB_TAGS}"}
 export WANDB_DIR=${WANDB_DIR:-"${BAYESIAN_OUTPUT_DIR}/wandb"}
 mkdir -p "${WANDB_DIR}"
 
@@ -232,6 +269,7 @@ echo "========== Stage 2: Train BayesianPRM belief network =========="
 echo "REPO_ROOT: ${REPO_ROOT}"
 echo "BAYESIAN_MODEL_PATH: ${BAYESIAN_MODEL_PATH}"
 echo "ENSEMBLE_CHECKPOINT: ${ENSEMBLE_CHECKPOINT}"
+echo "ENSEMBLE_OUTPUT_DIR: ${ENSEMBLE_OUTPUT_DIR}"
 echo "BAYESIAN_OUTPUT_DIR: ${BAYESIAN_OUTPUT_DIR}"
 echo "META_PATH: ${META_PATH}"
 echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
@@ -250,6 +288,7 @@ echo "BELIEF_DROPOUT: ${BELIEF_DROPOUT}"
 echo "BELIEF_BETA_KL: ${BELIEF_BETA_KL}"
 echo "BELIEF_USE_REWARD_PROBS: ${BELIEF_USE_REWARD_PROBS}"
 echo "BELIEF_LOGLIK_NORMALIZE_BY_N: ${BELIEF_LOGLIK_NORMALIZE_BY_N}"
+echo "MAX_STEPS: ${MAX_STEPS}"
 echo "WANDB_PROJECT: ${WANDB_PROJECT}"
 echo "WANDB_NAME: ${WANDB_NAME}"
 echo "WANDB_RUN_GROUP: ${WANDB_RUN_GROUP}"

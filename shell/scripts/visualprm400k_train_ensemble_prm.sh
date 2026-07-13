@@ -15,7 +15,7 @@ export HF_DATASETS_OFFLINE=1
 # =========================
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3"}
 GPUS=${GPUS:-4}
-model_name=${model_name:-"InternVL3-8B"}
+model_name=${model_name:-"InternVL3-2B"}
 export MASTER_PORT=${MASTER_PORT:-4325}
 ENSEMBLE_PRM_BOOTSTRAP_PROB=${ENSEMBLE_PRM_BOOTSTRAP_PROB:-1.0}
 RESUME_TRAINING=${RESUME_TRAINING:-0}
@@ -27,7 +27,7 @@ SAVE_ONLY_MODEL=${SAVE_ONLY_MODEL:-True}
 ENSEMBLE_PRM_NUM_HEADS=${ENSEMBLE_PRM_NUM_HEADS:-5}
 ENSEMBLE_PRM_HIDDEN_DIM=${ENSEMBLE_PRM_HIDDEN_DIM:-256}
 ENSEMBLE_PRM_DROPOUT=${ENSEMBLE_PRM_DROPOUT:-0.0}
-ENSEMBLE_PRM_USE_PRIOR_NETWORK=${ENSEMBLE_PRM_USE_PRIOR_NETWORK:-False}
+ENSEMBLE_PRM_USE_PRIOR_NETWORK=${ENSEMBLE_PRM_USE_PRIOR_NETWORK:-True}
 ENSEMBLE_PRM_PRIOR_SCALE=${ENSEMBLE_PRM_PRIOR_SCALE:-1.0}
 
 # Use repo-relative log dir by default.
@@ -197,7 +197,7 @@ python -m torch.distributed.run \
   --gradient_accumulation_steps ${GRADIENT_ACC} \
   --save_strategy "steps" \
   --save_only_model ${SAVE_ONLY_MODEL} \
-  --save_steps 100 \
+  --save_steps 10 \
   --save_total_limit 1 \
   --learning_rate 1e-5 \
   --weight_decay 0.05 \
