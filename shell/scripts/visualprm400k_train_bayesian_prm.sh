@@ -346,4 +346,4 @@ for i, line in enumerate(sys.stdin, 1):
         dump()
 
 dump()
-' "${ENSEMBLE_OUTPUT_DIR}/training_log.txt" 1000 100
+' "${BAYESIAN_OUTPUT_DIR}/training_log.txt" 1000 100

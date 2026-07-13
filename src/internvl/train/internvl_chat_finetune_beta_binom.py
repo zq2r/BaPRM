@@ -1696,7 +1696,26 @@ def main():
                 f"prm_loss_type='{model_args.prm_loss_type}' requires "
                 "InternVLChatModel.init_ensemble_prm_head()."
             )
+
         model.init_ensemble_prm_head(force_reinit=False)
+
+        # Sanity check: the constructed ensemble head must match the CLI/config
+        # prior-network setting. This is especially important when loading an
+        # ensemble checkpoint into BayesianPRM.
+        actual_use_prior = getattr(
+            model.ensemble_prm_head,
+            "use_prior_network",
+            False,
+        )
+        expected_use_prior = bool(model_args.ensemble_prm_use_prior_network)
+
+        if actual_use_prior != expected_use_prior:
+            raise RuntimeError(
+                "Mismatch between CLI prior setting and constructed ensemble head: "
+                f"CLI ensemble_prm_use_prior_network={expected_use_prior}, "
+                f"head.use_prior_network={actual_use_prior}. "
+                "Please check the checkpoint config or reinitialize the ensemble head."
+            )
 
     if model_args.prm_loss_type == 'ensemble_prm':
         # Make sure only the learned ensemble branch is trainable.
@@ -1771,7 +1790,7 @@ def main():
                 f'Using ensemble PRM head: '
                 f'num_heads={model_args.ensemble_prm_num_heads}, '
                 f'hidden_dim={model_args.ensemble_prm_hidden_dim}, '
-                f'dropout={model_args.ensemble_prm_dropout}'
+                f'dropout={model_args.ensemble_prm_dropout}, '
                 f'use_prior_network={model_args.ensemble_prm_use_prior_network}, '
                 f'prior_scale={model_args.ensemble_prm_prior_scale}'
             )
