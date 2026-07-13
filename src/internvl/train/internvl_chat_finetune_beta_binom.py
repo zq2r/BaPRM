@@ -1722,12 +1722,47 @@ def main():
             )
 
     if model_args.prm_loss_type == 'bayesian_prm':
+        # BayesianPRM trains only the belief network.
+        # The ensemble PRM is treated as a frozen set of reward hypotheses.
+
+        if not hasattr(model, 'ensemble_prm_head') or model.ensemble_prm_head is None:
+            raise RuntimeError(
+                "prm_loss_type='bayesian_prm' requires an initialized "
+                "ensemble_prm_head. Please load or initialize an ensemble PRM "
+                "checkpoint before training the belief head."
+            )
+
+        # 1. Freeze the whole ensemble hypothesis set.
+        for p in model.ensemble_prm_head.parameters():
+            p.requires_grad = False
+
+        # 2. Extra safety: if the ensemble head contains a randomized prior
+        #    branch, keep it frozen even if previous code accidentally
+        #    performed blanket unfreezing.
+        if hasattr(model.ensemble_prm_head, "freeze_prior_network"):
+            model.ensemble_prm_head.freeze_prior_network()
+
+        if (
+            getattr(model.ensemble_prm_head, "use_prior_network", False)
+            and hasattr(model.ensemble_prm_head, "prior_is_frozen")
+        ):
+            assert model.ensemble_prm_head.prior_is_frozen(), (
+                "BayesianPRM expects the ensemble prior network to be frozen, "
+                "but some prior parameters are trainable."
+            )
+
+        # 3. Initialize the belief head.
         if not hasattr(model, 'init_belief_head'):
             raise RuntimeError(
                 "prm_loss_type='bayesian_prm' requires "
                 "InternVLChatModel.init_belief_head()."
             )
+
         model.init_belief_head(force_reinit=False)
+
+        # 4. Train only the belief head.
+        for p in model.belief_head.parameters():
+            p.requires_grad = True
 
     if dist.get_rank() == 0:
         logger.info(f'Using PRM loss type: {model_args.prm_loss_type}')
