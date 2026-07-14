@@ -342,6 +342,37 @@ class ModelArguments:
             "help": "Normalize BayesianPRM count log-likelihood by N for stable training."
         },
     )
+    belief_use_conservatism: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Whether to use a conservative posterior correction in "
+                "BayesianPRM. When False, BayesianPRM reduces to the original "
+                "reliability-posterior version."
+            )
+        },
+    )
+    belief_conservatism_beta: float = field(
+        default=0.1,
+        metadata={
+            "help": (
+                "Temperature beta_2 for the conservative posterior. "
+                "The conservative posterior is computed as "
+                "softmax(-reward / beta_2). Must be positive."
+            )
+        },
+    )
+    belief_hybrid_lambda: float = field(
+        default=1.0,
+        metadata={
+            "help": (
+                "Mixture coefficient lambda for the hybrid posterior: "
+                "lambda * reliability_posterior + "
+                "(1 - lambda) * conservative_posterior. "
+                "Must be in [0, 1]. lambda=1.0 disables the conservative correction."
+            )
+        },
+    )
     ensemble_prm_bootstrap_prob: float = field(
         default=1.0,
         metadata={
@@ -1681,6 +1712,15 @@ def main():
     model.config.belief_loglik_normalize_by_n = (
         model_args.belief_loglik_normalize_by_n
     )
+    model.config.belief_use_conservatism = (
+        model_args.belief_use_conservatism
+    )
+    model.config.belief_conservatism_beta = (
+        model_args.belief_conservatism_beta
+    )
+    model.config.belief_hybrid_lambda = (
+        model_args.belief_hybrid_lambda
+    )
 
     model.belief_hidden_dim = int(model_args.belief_hidden_dim)
     model.belief_dropout = float(model_args.belief_dropout)
@@ -1689,6 +1729,16 @@ def main():
     model.belief_loglik_normalize_by_n = bool(
         model_args.belief_loglik_normalize_by_n
     )
+    model.belief_use_conservatism = bool(
+        model_args.belief_use_conservatism
+    )
+    model.belief_conservatism_beta = float(
+        model_args.belief_conservatism_beta
+    )
+    model.belief_hybrid_lambda = float(
+        model_args.belief_hybrid_lambda
+    )
+    
 
     if model_args.prm_loss_type in ('ensemble_prm', 'bayesian_prm'):
         if not hasattr(model, 'init_ensemble_prm_head'):

@@ -170,6 +170,15 @@ class InternVLChatModel(PreTrainedModel):
         self.belief_loglik_normalize_by_n = bool(
             getattr(config, "belief_loglik_normalize_by_n", True)
         )
+        self.belief_use_conservatism = bool(
+        getattr(config, "belief_use_conservatism", False)
+        )
+        self.belief_conservatism_beta = float(
+            getattr(config, "belief_conservatism_beta", 0.1)
+        )
+        self.belief_hybrid_lambda = float(
+            getattr(config, "belief_hybrid_lambda", 1.0)
+        )
         self.belief_head = None
         
         self.reset_kappa_head(self.beta_binom_kappa_init)
@@ -691,6 +700,9 @@ class InternVLChatModel(PreTrainedModel):
                             "bayesian_prm_loss": 0.0,
                             "bayesian_expected_loglik": 0.0,
                             "bayesian_kl": 0.0,
+
+                            # Final posterior stats. When conservatism is disabled,
+                            # final posterior equals reliability posterior.
                             "bayesian_entropy": 0.0,
                             "bayesian_weight_top1_mean": 0.0,
                             "bayesian_weight_max": 0.0,
@@ -698,6 +710,25 @@ class InternVLChatModel(PreTrainedModel):
                             "bayesian_reward_mean": 0.0,
                             "bayesian_reward_std": 0.0,
                             "bayesian_uncertainty_mean": 0.0,
+
+                            # Explicit reliability / hybrid stats.
+                            "bayesian_rel_reward_mean": 0.0,
+                            "bayesian_post_reward_mean": 0.0,
+                            "bayesian_rel_entropy": 0.0,
+                            "bayesian_post_entropy": 0.0,
+
+                            # Conservatism settings.
+                            "bayesian_use_conservatism": float(
+                                bool(getattr(self, "belief_use_conservatism", False))
+                            ),
+                            "bayesian_conservatism_active": 0.0,
+                            "bayesian_hybrid_lambda": float(
+                                getattr(self, "belief_hybrid_lambda", 1.0)
+                            ),
+                            "bayesian_conservatism_beta": float(
+                                getattr(self, "belief_conservatism_beta", 0.1)
+                            ),
+
                             "valid_prm_count": 0.0,
                         }
                 else:
@@ -724,8 +755,19 @@ class InternVLChatModel(PreTrainedModel):
                     # Train only the belief network through this loss.  We detach the
                     # marker hidden states so the belief ELBO does not update the reward
                     # LLM/projector through prm_h.
-                    belief_logits = self.belief_head(prm_h.detach(), mu.detach())  # [P, E]
-                    weights = F.softmax(belief_logits.float(), dim=-1)
+                    belief_logits = self.belief_head(
+                        prm_h.detach(),
+                        mu.detach(),
+                    )  # [P, E]
+
+                    # Reliability posterior:
+                    # alpha_rel = q_phi(z=m | c_t).
+                    #
+                    # This is the only posterior used in the ELBO-style training loss.
+                    rel_weights = F.softmax(
+                        belief_logits.float(),
+                        dim=-1,
+                    )
 
                     # Count log-likelihood under each frozen ensemble member:
                     # log p(K | N, mu_m) = K log mu_m + (N-K) log(1-mu_m)
@@ -740,17 +782,26 @@ class InternVLChatModel(PreTrainedModel):
                     if bool(getattr(self, "belief_loglik_normalize_by_n", True)):
                         log_lik = log_lik / selected_n[:, None].clamp_min(1.0)
 
-                    expected_loglik = (weights * log_lik).sum(dim=-1)
+                    # Reliability-posterior ELBO loss.
+                    # Do NOT use post_weights here; otherwise the belief head would no
+                    # longer learn the reliability posterior.
+                    expected_loglik = (rel_weights * log_lik).sum(dim=-1)
 
-                    num_heads = weights.shape[-1]
-                    log_weights = torch.log(weights.clamp_min(self.beta_binom_eps))
+                    num_heads = rel_weights.shape[-1]
+                    log_rel_weights = torch.log(
+                        rel_weights.clamp_min(self.beta_binom_eps)
+                    )
 
                     # KL(q_phi(z|c) || Uniform(z)) = sum_m w_m log(M w_m)
                     kl_to_uniform = (
-                        weights * (log_weights + math.log(float(num_heads)))
+                        rel_weights
+                        * (log_rel_weights + math.log(float(num_heads)))
                     ).sum(dim=-1)
 
-                    belief_beta_kl = float(getattr(self, "belief_beta_kl", 0.1))
+                    belief_beta_kl = float(
+                        getattr(self, "belief_beta_kl", 0.1)
+                    )
+
                     bayesian_prm_loss = (
                         -expected_loglik + belief_beta_kl * kl_to_uniform
                     ).mean()
@@ -758,18 +809,87 @@ class InternVLChatModel(PreTrainedModel):
                     loss = bayesian_prm_loss
 
                     with torch.no_grad():
-                        reward_mean = (weights * mu).sum(dim=-1)  # [P]
+                        # --------------------------------------------------------------
+                        # Conservative posterior and final hybrid posterior.
+                        # --------------------------------------------------------------
+                        use_conservatism = bool(
+                            getattr(self, "belief_use_conservatism", False)
+                        )
+                        hybrid_lambda = float(
+                            getattr(self, "belief_hybrid_lambda", 1.0)
+                        )
+                        conservatism_beta = float(
+                            getattr(self, "belief_conservatism_beta", 0.1)
+                        )
+
+                        if use_conservatism and hybrid_lambda < 1.0:
+                            temperature = max(
+                                conservatism_beta,
+                                float(self.beta_binom_eps),
+                            )
+
+                            # Conservative posterior:
+                            # alpha_con = softmax(-reward / beta_2).
+                            #
+                            # Here reward is represented by each ensemble head's predicted
+                            # correctness probability mu_m(c_t).
+                            con_weights = F.softmax(
+                                -mu / temperature,
+                                dim=-1,
+                            )
+
+                            # Hybrid posterior:
+                            # alpha_post = lambda * alpha_rel + (1-lambda) * alpha_con.
+                            post_weights = (
+                                hybrid_lambda * rel_weights
+                                + (1.0 - hybrid_lambda) * con_weights
+                            )
+
+                            # Numerical safety. Mathematically the convex combination already
+                            # sums to one, but renormalization prevents tiny fp errors.
+                            post_weights = post_weights / post_weights.sum(
+                                dim=-1,
+                                keepdim=True,
+                            ).clamp_min(self.beta_binom_eps)
+
+                            conservatism_active = 1.0
+                        else:
+                            con_weights = None
+                            post_weights = rel_weights
+                            conservatism_active = 0.0
+
+                        # --------------------------------------------------------------
+                        # Reliability reward and final hybrid reward.
+                        # --------------------------------------------------------------
+                        rel_reward_mean = (rel_weights * mu).sum(dim=-1)  # [P]
+                        post_reward_mean = (post_weights * mu).sum(dim=-1)  # [P]
+
+                        # By convention, legacy fields without "rel_" or "post_" refer to
+                        # the final posterior used for reward computation.
+                        reward_mean = post_reward_mean
+
                         weighted_var = (
-                            weights * (mu - reward_mean[:, None]).pow(2)
+                            post_weights * (mu - reward_mean[:, None]).pow(2)
                         ).sum(dim=-1)
                         weighted_uncertainty = torch.sqrt(
                             weighted_var.clamp_min(0.0)
                         )
 
-                        entropy = -(weights * log_weights).sum(dim=-1)
-                        top1_weight = weights.max(dim=-1).values
+                        log_post_weights = torch.log(
+                            post_weights.clamp_min(self.beta_binom_eps)
+                        )
 
-                        self._beta_last_stats = {
+                        rel_entropy = -(
+                            rel_weights * log_rel_weights
+                        ).sum(dim=-1)
+
+                        post_entropy = -(
+                            post_weights * log_post_weights
+                        ).sum(dim=-1)
+
+                        top1_weight = post_weights.max(dim=-1).values
+
+                        stats = {
                             "bayesian_prm_loss": float(
                                 bayesian_prm_loss.detach().item()
                             ),
@@ -779,17 +899,19 @@ class InternVLChatModel(PreTrainedModel):
                             "bayesian_kl": float(
                                 kl_to_uniform.mean().detach().item()
                             ),
+
+                            # Final posterior stats.
                             "bayesian_entropy": float(
-                                entropy.mean().detach().item()
+                                post_entropy.mean().detach().item()
                             ),
                             "bayesian_weight_top1_mean": float(
                                 top1_weight.mean().detach().item()
                             ),
                             "bayesian_weight_max": float(
-                                weights.max().detach().item()
+                                post_weights.max().detach().item()
                             ),
                             "bayesian_weight_min": float(
-                                weights.min().detach().item()
+                                post_weights.min().detach().item()
                             ),
                             "bayesian_reward_mean": float(
                                 reward_mean.mean().detach().item()
@@ -800,11 +922,78 @@ class InternVLChatModel(PreTrainedModel):
                             "bayesian_uncertainty_mean": float(
                                 weighted_uncertainty.mean().detach().item()
                             ),
+
+                            # Explicit reliability / hybrid reward stats.
+                            "bayesian_rel_reward_mean": float(
+                                rel_reward_mean.mean().detach().item()
+                            ),
+                            "bayesian_post_reward_mean": float(
+                                post_reward_mean.mean().detach().item()
+                            ),
+                            "bayesian_rel_entropy": float(
+                                rel_entropy.mean().detach().item()
+                            ),
+                            "bayesian_post_entropy": float(
+                                post_entropy.mean().detach().item()
+                            ),
+
+                            # Conservatism settings.
+                            "bayesian_use_conservatism": float(
+                                use_conservatism
+                            ),
+                            "bayesian_conservatism_active": float(
+                                conservatism_active
+                            ),
+                            "bayesian_hybrid_lambda": float(
+                                hybrid_lambda
+                            ),
+                            "bayesian_conservatism_beta": float(
+                                conservatism_beta
+                            ),
+
                             "bayesian_target_mean": float(
                                 (selected_k / selected_n).mean().detach().item()
                             ),
                             "valid_prm_count": float(prm_h.size(0)),
                         }
+
+                        if con_weights is not None:
+                            con_reward_mean = (con_weights * mu).sum(dim=-1)
+                            log_con_weights = torch.log(
+                                con_weights.clamp_min(self.beta_binom_eps)
+                            )
+                            con_entropy = -(
+                                con_weights * log_con_weights
+                            ).sum(dim=-1)
+                            con_top1_weight = con_weights.max(dim=-1).values
+
+                            stats.update(
+                                {
+                                    "bayesian_con_reward_mean": float(
+                                        con_reward_mean.mean().detach().item()
+                                    ),
+                                    "bayesian_con_entropy": float(
+                                        con_entropy.mean().detach().item()
+                                    ),
+                                    "bayesian_con_weight_top1_mean": float(
+                                        con_top1_weight.mean().detach().item()
+                                    ),
+                                    "bayesian_con_reward_delta": float(
+                                        (
+                                            rel_reward_mean.mean()
+                                            - con_reward_mean.mean()
+                                        ).detach().item()
+                                    ),
+                                    "bayesian_post_reward_delta": float(
+                                        (
+                                            rel_reward_mean.mean()
+                                            - post_reward_mean.mean()
+                                        ).detach().item()
+                                    ),
+                                }
+                            )
+
+                        self._beta_last_stats = stats
 
             elif use_beta_binom:
                 selected_k = prm_counts_k.contiguous().view(-1)[placeholder_mask]
