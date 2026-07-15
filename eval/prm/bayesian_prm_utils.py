@@ -101,11 +101,64 @@ def batch_prm_weighted_mu(
     # mu_heads: [P, E]
     mu_heads = ensemble_probs.transpose(0, 1).contiguous()
 
-    # weights: [P, E]
-    belief_logits = model.belief_head(prm_h, mu_heads)
-    weights = torch.softmax(belief_logits.float(), dim=-1)
+    # Reliability posterior: alpha_rel = q_phi(z=m | c_t).
+    # Shape: [P, E]
+    belief_logits = model.belief_head(
+        prm_h,
+        mu_heads,
+    )
+    rel_weights = torch.softmax(
+        belief_logits.float(),
+        dim=-1,
+    )
 
-    # mu_bayes: [P]
-    mu_bayes = (weights * mu_heads).sum(dim=-1)
+    # Conservative posterior and final hybrid posterior.
+    #
+    # These attributes are loaded from checkpoint config by InternVLChatModel.
+    # If conservatism is disabled, this exactly reduces to the original
+    # BayesianPRM evaluator.
+    use_conservatism = bool(
+        getattr(model, "belief_use_conservatism", False)
+    )
+    hybrid_lambda = float(
+        getattr(model, "belief_hybrid_lambda", 1.0)
+    )
+    conservatism_beta = float(
+        getattr(model, "belief_conservatism_beta", 0.1)
+    )
 
+    if use_conservatism and hybrid_lambda < 1.0:
+        temperature = max(
+            conservatism_beta,
+            1e-6,
+        )
+
+        # Conservative posterior:
+        # alpha_con = softmax(-reward / beta_2).
+        #
+        # Here reward is represented by each ensemble head's predicted
+        # correctness probability mu_m(c_t).
+        con_weights = torch.softmax(
+            -mu_heads / temperature,
+            dim=-1,
+        )
+
+        # Hybrid posterior:
+        # alpha_post = lambda * alpha_rel + (1-lambda) * alpha_con.
+        post_weights = (
+            hybrid_lambda * rel_weights
+            + (1.0 - hybrid_lambda) * con_weights
+        )
+
+        # Numerical safety.
+        post_weights = post_weights / post_weights.sum(
+            dim=-1,
+            keepdim=True,
+        ).clamp_min(1e-6)
+    else:
+        post_weights = rel_weights
+
+    # Final BayesianPRM score.
+    # Shape: [P]
+    mu_bayes = (post_weights * mu_heads).sum(dim=-1)
     return mu_bayes
