@@ -262,6 +262,9 @@ def evaluate_chat_model():
                     questions=curr_questions,
                     num_patches_list=curr_num_patches,
                     verbose=False,
+                    belief_use_conservatism=args.belief_use_conservatism,
+                    belief_conservatism_beta=args.belief_conservatism_beta,
+                    belief_hybrid_lambda=args.belief_hybrid_lambda,
                 )
 
                 score = mu
@@ -340,6 +343,35 @@ if __name__ == '__main__':
         type=float,
         default=0.5,
         help='Risk penalty lambda for mu-lambda*sigma mode.',
+    )
+    parser.add_argument(
+    '--belief-use-conservatism',
+    type=str,
+    default='auto',
+    choices=['auto', 'true', 'false'],
+    help=(
+        "Eval-time override for BayesianPRM conservative posterior. "
+        "'auto' uses checkpoint config; 'true' forces it on; "
+        "'false' forces it off."
+        ),
+    )
+    parser.add_argument(
+        '--belief-conservatism-beta',
+        type=float,
+        default=None,
+        help=(
+            "Eval-time beta_2 for conservative posterior. "
+            "If omitted, use checkpoint config."
+        ),
+    )
+    parser.add_argument(
+        '--belief-hybrid-lambda',
+        type=float,
+        default=None,
+        help=(
+            "Eval-time lambda for hybrid posterior. "
+            "If omitted, use checkpoint config."
+        ),
     )
     parser.add_argument(
         '--skip-uncertainty-diagnose',

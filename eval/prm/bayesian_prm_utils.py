@@ -1,6 +1,31 @@
 import torch
 from internvl.conversation import get_conv_template
 
+def _resolve_optional_bool(value, default):
+    """
+    Resolve an optional bool override.
+
+    value:
+        None / "auto": use default
+        True / "true" / "1" / "yes": force True
+        False / "false" / "0" / "no": force False
+    """
+    if value is None:
+        return bool(default)
+
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, str):
+        value = value.strip().lower()
+        if value in ("auto", "none", ""):
+            return bool(default)
+        if value in ("true", "1", "yes", "y"):
+            return True
+        if value in ("false", "0", "no", "n"):
+            return False
+
+    raise ValueError(f"Cannot parse optional bool value: {value}")
 
 @torch.no_grad()
 def batch_prm_weighted_mu(
@@ -10,6 +35,9 @@ def batch_prm_weighted_mu(
     questions,
     num_patches_list,
     verbose=False,
+    belief_use_conservatism=None,
+    belief_conservatism_beta=None,
+    belief_hybrid_lambda=None,
 ):
     """
     Basic BayesianPRM evaluator.
@@ -117,15 +145,27 @@ def batch_prm_weighted_mu(
     # These attributes are loaded from checkpoint config by InternVLChatModel.
     # If conservatism is disabled, this exactly reduces to the original
     # BayesianPRM evaluator.
-    use_conservatism = bool(
+    default_use_conservatism = bool(
         getattr(model, "belief_use_conservatism", False)
     )
-    hybrid_lambda = float(
-        getattr(model, "belief_hybrid_lambda", 1.0)
+    use_conservatism = _resolve_optional_bool(
+        belief_use_conservatism,
+        default_use_conservatism,
     )
-    conservatism_beta = float(
-        getattr(model, "belief_conservatism_beta", 0.1)
-    )
+
+    if belief_hybrid_lambda is None:
+        hybrid_lambda = float(
+            getattr(model, "belief_hybrid_lambda", 1.0)
+        )
+    else:
+        hybrid_lambda = float(belief_hybrid_lambda)
+
+    if belief_conservatism_beta is None:
+        conservatism_beta = float(
+            getattr(model, "belief_conservatism_beta", 0.1)
+        )
+    else:
+        conservatism_beta = float(belief_conservatism_beta)
 
     if use_conservatism and hybrid_lambda < 1.0:
         temperature = max(
