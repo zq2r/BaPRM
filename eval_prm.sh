@@ -6,9 +6,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR}"
 cd "${REPO_ROOT}"
 
-export HF_HUB_OFFLINE=1
-export TRANSFORMERS_OFFLINE=1
-export HF_DATASETS_OFFLINE=1
+export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
+export TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
+export HF_DATASETS_OFFLINE=${HF_DATASETS_OFFLINE:-1}
 export PYTHONPATH="${REPO_ROOT}/src:${REPO_ROOT}:${PYTHONPATH:-}"
 
 # =========================
@@ -20,6 +20,7 @@ model_name=${model_name:-"InternVL3-8B"}
 # beta
 # normal
 # ensemble
+# bayesian
 PRM_MODE=${PRM_MODE:-"beta"}
 
 # 写一个就跑一个，写多个就顺序跑多个
@@ -31,6 +32,26 @@ benchs=${benchs:-"MathVision OlympiadBench MathVerse"}
 ANNOTATION_TAG=${ANNOTATION_TAG:-"oversample_2"}
 
 MASTER_PORT=${MASTER_PORT:-63702}
+
+# BayesianPRM checkpoint path convention.
+# 1/true: default to log/bayesian-prior-${model_name}-visualprm400k
+# 0/false: default to log/bayesian-${model_name}-visualprm400k
+BAYESIAN_FROM_PRIOR_ENSEMBLE=${BAYESIAN_FROM_PRIOR_ENSEMBLE:-1}
+
+# BayesianPRM eval-time conservative posterior override.
+# auto  = use checkpoint config
+# true  = force conservative posterior on
+# false = force conservative posterior off
+BELIEF_USE_CONSERVATISM=${BELIEF_USE_CONSERVATISM:-auto}
+BELIEF_CONSERVATISM_BETA=${BELIEF_CONSERVATISM_BETA:-}
+BELIEF_HYBRID_LAMBDA=${BELIEF_HYBRID_LAMBDA:-}
+
+is_true() {
+  case "$(echo "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|y) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 case "${PRM_MODE}" in
   beta)
@@ -45,16 +66,28 @@ case "${PRM_MODE}" in
     CKPT_ROOT=${CKPT_ROOT:-"${REPO_ROOT}/log/ensemble-${model_name}-visualprm400k"}
     SCRIPT_SUFFIX="ensemble"
     ;;
+  bayesian)
+    if is_true "${BAYESIAN_FROM_PRIOR_ENSEMBLE}"; then
+      CKPT_ROOT=${CKPT_ROOT:-"${REPO_ROOT}/log/bayesian-prior-${model_name}-visualprm400k"}
+    else
+      CKPT_ROOT=${CKPT_ROOT:-"${REPO_ROOT}/log/bayesian-${model_name}-visualprm400k"}
+    fi
+    SCRIPT_SUFFIX="bayesian"
+    ;;
   *)
     echo "ERROR: Unknown PRM_MODE=${PRM_MODE}"
-    echo "Supported: beta, normal, ensemble"
+    echo "Supported: beta, normal, ensemble, bayesian"
     exit 1
     ;;
 esac
 
 # If CKPT is not provided, use the latest checkpoint under CKPT_ROOT.
 if [ -z "${CKPT:-}" ]; then
-  CKPT=$(find "${CKPT_ROOT}" -maxdepth 1 -type d -name "checkpoint-*" 2>/dev/null | sort -V | tail -n 1)
+  CKPT=$(
+    find "${CKPT_ROOT}" -maxdepth 1 -type d -name "checkpoint-*" 2>/dev/null \
+      | sort -V \
+      | tail -n 1
+  )
 fi
 
 if [ -z "${CKPT:-}" ]; then
@@ -112,26 +145,25 @@ run_one_benchmark() {
       ;;
   esac
 
-ROOT_THIS="${ROOT:-${DEFAULT_ROOT}}"
-ANNOTATION_THIS="${ANNOTATION:-${DEFAULT_ANNOTATION}}"
+  ROOT_THIS="${ROOT:-${DEFAULT_ROOT}}"
+  ANNOTATION_THIS="${ANNOTATION:-${DEFAULT_ANNOTATION}}"
 
-if [ -n "${ANNOTATION:-}" ]; then
-  ANNOTATION_DIR_TAG="$(basename "${ANNOTATION_THIS}" .json)"
-else
-  ANNOTATION_DIR_TAG="${ANNOTATION_TAG}"
-fi
+  if [ -n "${ANNOTATION:-}" ]; then
+    ANNOTATION_DIR_TAG="$(basename "${ANNOTATION_THIS}" .json)"
+  else
+    ANNOTATION_DIR_TAG="${ANNOTATION_TAG}"
+  fi
 
-# OlympiadBench 的 annotation 可能包含作者机器上的绝对路径：
-# /storage1/jiaxinh/Active/jinyuan/MM-PRM/...
-# 这里自动重写成当前 REPO_ROOT 下的路径。
-if [ "${BENCH}" = "OlympiadBench" ]; then
-  FIXED_ANNOTATION="${CKPT_ROOT}/fixed_annotations/OlympiadBench_${ANNOTATION_DIR_TAG}.json"
-  mkdir -p "$(dirname "${FIXED_ANNOTATION}")"
-
-  SRC_ANNOTATION="${ANNOTATION_THIS}" \
-  DST_ANNOTATION="${FIXED_ANNOTATION}" \
-  REPO_ROOT="${REPO_ROOT}" \
-  python - <<'PY'
+  # OlympiadBench 的 annotation 可能包含作者机器上的绝对路径：
+  # /storage1/jiaxinh/Active/jinyuan/MM-PRM/...
+  # 这里自动重写成当前 REPO_ROOT 下的路径。
+  if [ "${BENCH}" = "OlympiadBench" ]; then
+    FIXED_ANNOTATION="${CKPT_ROOT}/fixed_annotations/OlympiadBench_${ANNOTATION_DIR_TAG}.json"
+    mkdir -p "$(dirname "${FIXED_ANNOTATION}")"
+    SRC_ANNOTATION="${ANNOTATION_THIS}" \
+    DST_ANNOTATION="${FIXED_ANNOTATION}" \
+    REPO_ROOT="${REPO_ROOT}" \
+    python - <<'PY'
 import json
 import os
 
@@ -142,6 +174,7 @@ repo_root = os.environ["REPO_ROOT"]
 old_prefixes = [
     "/storage1/jiaxinh/Active/jinyuan/MM-PRM",
 ]
+
 
 def fix_obj(x):
     if isinstance(x, dict):
@@ -166,12 +199,49 @@ with open(dst, "w", encoding="utf-8") as f:
 
 print(f"[fix annotation] {src} -> {dst}")
 PY
+    ANNOTATION_THIS="${FIXED_ANNOTATION}"
+  fi
 
-  ANNOTATION_THIS="${FIXED_ANNOTATION}"
+  EXTRA_ARGS=()
 
-fi
+  if [ "${PRM_MODE}" = "beta" ]; then
+    EXTRA_ARGS+=(--score-mode "${SCORE_MODE}")
+  fi
 
-OUT_DIR="${CKPT_ROOT}/eval_${PRM_MODE}_${BENCH}/${ANNOTATION_DIR_TAG}/$(basename "${CKPT}")"
+  if [ "${PRM_MODE}" = "bayesian" ]; then
+    EXTRA_ARGS+=(
+      --belief-use-conservatism "${BELIEF_USE_CONSERVATISM}"
+    )
+
+    if [ -n "${BELIEF_CONSERVATISM_BETA}" ]; then
+      EXTRA_ARGS+=(
+        --belief-conservatism-beta "${BELIEF_CONSERVATISM_BETA}"
+      )
+    fi
+
+    if [ -n "${BELIEF_HYBRID_LAMBDA}" ]; then
+      EXTRA_ARGS+=(
+        --belief-hybrid-lambda "${BELIEF_HYBRID_LAMBDA}"
+      )
+    fi
+  fi
+
+  if [ "${PRM_MODE}" = "bayesian" ]; then
+    EVAL_SETTING_TAG="cons-${BELIEF_USE_CONSERVATISM}"
+
+    if [ -n "${BELIEF_CONSERVATISM_BETA}" ]; then
+      EVAL_SETTING_TAG="${EVAL_SETTING_TAG}_beta-${BELIEF_CONSERVATISM_BETA}"
+    fi
+
+    if [ -n "${BELIEF_HYBRID_LAMBDA}" ]; then
+      EVAL_SETTING_TAG="${EVAL_SETTING_TAG}_lambda-${BELIEF_HYBRID_LAMBDA}"
+    fi
+
+    EVAL_SETTING_TAG="$(echo "${EVAL_SETTING_TAG}" | tr '/ ' '__')"
+    OUT_DIR="${CKPT_ROOT}/eval_${PRM_MODE}_${BENCH}/${ANNOTATION_DIR_TAG}/${EVAL_SETTING_TAG}/$(basename "${CKPT}")"
+  else
+    OUT_DIR="${CKPT_ROOT}/eval_${PRM_MODE}_${BENCH}/${ANNOTATION_DIR_TAG}/$(basename "${CKPT}")"
+  fi
 
   mkdir -p "${OUT_DIR}"
 
@@ -183,11 +253,6 @@ OUT_DIR="${CKPT_ROOT}/eval_${PRM_MODE}_${BENCH}/${ANNOTATION_DIR_TAG}/$(basename
   if [ ! -f "${EVAL_SCRIPT}" ]; then
     echo "ERROR: eval script does not exist: ${EVAL_SCRIPT}"
     exit 1
-  fi
-
-  EXTRA_ARGS=()
-  if [ "${PRM_MODE}" = "beta" ]; then
-    EXTRA_ARGS+=(--score-mode "${SCORE_MODE}")
   fi
 
   echo "========== Eval Config =========="
@@ -205,9 +270,19 @@ OUT_DIR="${CKPT_ROOT}/eval_${PRM_MODE}_${BENCH}/${ANNOTATION_DIR_TAG}/$(basename
   echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
   echo "GPUS: ${GPUS}"
   echo "MASTER_PORT: ${PORT}"
+
   if [ "${PRM_MODE}" = "beta" ]; then
     echo "SCORE_MODE: ${SCORE_MODE}"
   fi
+
+  if [ "${PRM_MODE}" = "bayesian" ]; then
+    echo "BAYESIAN_FROM_PRIOR_ENSEMBLE: ${BAYESIAN_FROM_PRIOR_ENSEMBLE}"
+    echo "BELIEF_USE_CONSERVATISM: ${BELIEF_USE_CONSERVATISM}"
+    echo "BELIEF_CONSERVATISM_BETA: ${BELIEF_CONSERVATISM_BETA}"
+    echo "BELIEF_HYBRID_LAMBDA: ${BELIEF_HYBRID_LAMBDA}"
+    echo "EVAL_SETTING_TAG: ${EVAL_SETTING_TAG}"
+  fi
+
   echo "================================="
 
   torchrun \
