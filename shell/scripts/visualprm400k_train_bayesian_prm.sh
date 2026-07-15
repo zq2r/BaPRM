@@ -85,6 +85,10 @@ BELIEF_DROPOUT=${BELIEF_DROPOUT:-0.0}
 BELIEF_USE_REWARD_PROBS=${BELIEF_USE_REWARD_PROBS:-True}
 BELIEF_LOGLIK_NORMALIZE_BY_N=${BELIEF_LOGLIK_NORMALIZE_BY_N:-True}
 
+BELIEF_USE_CONSERVATISM=${BELIEF_USE_CONSERVATISM:-False}
+BELIEF_CONSERVATISM_BETA=${BELIEF_CONSERVATISM_BETA:-0.1}
+BELIEF_HYBRID_LAMBDA=${BELIEF_HYBRID_LAMBDA:-1.0}
+
 # =========================
 # Batch / distributed configs
 # =========================
@@ -344,6 +348,9 @@ python -m torch.distributed.run \
   --belief_beta_kl ${BELIEF_BETA_KL} \
   --belief_use_reward_probs ${BELIEF_USE_REWARD_PROBS} \
   --belief_loglik_normalize_by_n ${BELIEF_LOGLIK_NORMALIZE_BY_N} \
+  --belief_use_conservatism ${BELIEF_USE_CONSERVATISM} \
+  --belief_conservatism_beta ${BELIEF_CONSERVATISM_BETA} \
+  --belief_hybrid_lambda ${BELIEF_HYBRID_LAMBDA} \
   --beta_binom_kappa_min ${BETA_BINOM_KAPPA_MIN} \
   --beta_binom_kappa_init ${BETA_BINOM_KAPPA_INIT} \
   --beta_binom_evi_reg ${BETA_BINOM_EVI_REG} \
