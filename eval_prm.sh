@@ -300,6 +300,7 @@ PY
     "${EXTRA_ARGS[@]}"
 }
 
+
 idx=0
 for BENCH in ${benchs}; do
   PORT=$((MASTER_PORT + idx))
