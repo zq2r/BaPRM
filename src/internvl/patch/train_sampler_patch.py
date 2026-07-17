@@ -8,7 +8,7 @@ from typing import List, Optional
 
 import torch
 import transformers
-from torch.utils.data import Dataset, Sampler
+from torch.utils.data import Dataset, Sampler, Subset
 from transformers.tokenization_utils_base import BatchEncoding
 from transformers.trainer import (LengthGroupedSampler, RandomSampler,
                                   has_length)
@@ -115,6 +115,37 @@ class LengthGroupedSampler(Sampler):
         )
         return iter(indices)
 
+def _get_lengths_for_group_by_length(dataset):
+    """
+    Collect per-sample lengths aligned with the dataset indices seen by DataLoader.
+
+    Supports:
+    1. original InternVL concat-style dataset with `.datasets`;
+    2. torch.utils.data.Subset wrapping such a dataset;
+    3. single dataset with `.length`.
+
+    Important:
+    For Subset, returned lengths must be reordered by subset.indices, because
+    LengthGroupedSampler will sample local indices 0..len(subset)-1.
+    """
+    if isinstance(dataset, Subset):
+        base_lengths = _get_lengths_for_group_by_length(dataset.dataset)
+        return [base_lengths[int(i)] for i in dataset.indices]
+
+    if hasattr(dataset, "length"):
+        return list(dataset.length)
+
+    if hasattr(dataset, "datasets"):
+        lengths = []
+        for sub_dataset in dataset.datasets:
+            lengths.extend(_get_lengths_for_group_by_length(sub_dataset))
+        return lengths
+
+    raise AttributeError(
+        "Cannot infer lengths for group_by_length sampler. "
+        "Expected dataset to be a Subset, to have `.length`, "
+        "or to have `.datasets`."
+    )
 
 # patch trainer
 def _get_train_sampler(self) -> Optional[torch.utils.data.Sampler]:
@@ -122,16 +153,24 @@ def _get_train_sampler(self) -> Optional[torch.utils.data.Sampler]:
         return None
     # Build the sampler.
     if self.args.group_by_length:
-        lengths = []
-        for dataset in self.train_dataset.datasets:
-            lengths = lengths + dataset.length
+        lengths = _get_lengths_for_group_by_length(self.train_dataset)
+
+        if len(lengths) != len(self.train_dataset):
+            raise ValueError(
+                "Length mismatch for group_by_length sampler: "
+                f"len(lengths)={len(lengths)}, "
+                f"len(train_dataset)={len(self.train_dataset)}. "
+                "This usually means the dataset split/subset indices are not "
+                "aligned with the length list."
+            )
+
         model_input_name = (
             self.tokenizer.model_input_names[0] if self.tokenizer is not None else None
         )
+
         return LengthGroupedSampler(
             self.args.train_batch_size,
             world_size=self.args.world_size * self.args.gradient_accumulation_steps,
-            # self.args.train_batch_size * self.args.gradient_accumulation_steps,
             dataset=self.train_dataset,
             lengths=lengths,
             model_input_name=model_input_name,
