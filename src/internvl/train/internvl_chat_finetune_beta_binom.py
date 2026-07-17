@@ -439,6 +439,43 @@ class DataTrainingArguments:
         default=None,
         metadata={'help': 'The path of the meta file of datasets.'},
     )
+    prm_data_split_enable: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Whether to split the PRM training data into an ensemble "
+                "training subset and a belief/reliability training subset."
+            )
+        },
+    )
+    prm_data_split_ratio: float = field(
+        default=0.8,
+        metadata={
+            "help": (
+                "Fraction of the training data used for ensemble PRM. "
+                "The remaining data is used for BayesianPRM belief training."
+            )
+        },
+    )
+    prm_data_split_seed: int = field(
+        default=42,
+        metadata={
+            "help": (
+                "Random seed for deterministic PRM data split."
+            )
+        },
+    )
+    prm_data_split_part: str = field(
+        default="auto",
+        metadata={
+            "help": (
+                "Which subset to use when PRM data split is enabled: "
+                "auto, ensemble, belief, or all. "
+                "auto uses ensemble split for ensemble_prm, belief split "
+                "for bayesian_prm, and all data for other modes."
+            )
+        },
+    )
     use_data_resampling: bool = field(
         default=False,
         metadata={'help': 'Set to True to use data resampling. Default is False.'},
@@ -578,6 +615,118 @@ def _safe_float(v):
         return float(v)
     except (TypeError, ValueError):
         return None
+    
+def split_prm_train_dataset(
+    train_dataset,
+    split_enable: bool,
+    split_ratio: float,
+    split_seed: int,
+    split_part: str,
+    prm_loss_type: str,
+):
+    """
+    Deterministically split the PRM training dataset into two disjoint parts.
+
+    - ensemble split:
+        Used to train the ensemble PRM reward hypotheses.
+
+    - belief split:
+        Used to train the BayesianPRM reliability posterior / belief head
+        with the ensemble frozen.
+
+    This helper does not modify the underlying dataset. It only wraps it
+    with torch.utils.data.Subset.
+    """
+    if not split_enable:
+        return train_dataset, {
+            "enabled": False,
+            "resolved_part": "all",
+            "raw_len": len(train_dataset),
+            "used_len": len(train_dataset),
+            "ensemble_len": len(train_dataset),
+            "belief_len": 0,
+        }
+
+    if not hasattr(train_dataset, "__len__"):
+        raise ValueError(
+            "PRM data split requires a map-style dataset with __len__."
+        )
+
+    n_total = len(train_dataset)
+
+    if n_total <= 1:
+        raise ValueError(
+            f"PRM data split requires at least 2 samples, got {n_total}."
+        )
+
+    if not 0.0 < float(split_ratio) < 1.0:
+        raise ValueError(
+            f"prm_data_split_ratio must be in (0, 1), got {split_ratio}."
+        )
+
+    split_part = str(split_part).lower()
+
+    if split_part == "auto":
+        if prm_loss_type == "ensemble_prm":
+            split_part = "ensemble"
+        elif prm_loss_type == "bayesian_prm":
+            split_part = "belief"
+        else:
+            split_part = "all"
+
+    if split_part == "all":
+        return train_dataset, {
+            "enabled": True,
+            "resolved_part": "all",
+            "raw_len": n_total,
+            "used_len": n_total,
+            "ensemble_len": n_total,
+            "belief_len": 0,
+        }
+
+    if split_part not in ("ensemble", "belief"):
+        raise ValueError(
+            "prm_data_split_part must be one of: "
+            f"auto, ensemble, belief, all. Got {split_part}."
+        )
+
+    n_ensemble = int(round(n_total * float(split_ratio)))
+    n_ensemble = max(1, min(n_total - 1, n_ensemble))
+    n_belief = n_total - n_ensemble
+
+    generator = torch.Generator()
+    generator.manual_seed(int(split_seed))
+
+    perm = torch.randperm(
+        n_total,
+        generator=generator,
+    ).tolist()
+
+    ensemble_indices = perm[:n_ensemble]
+    belief_indices = perm[n_ensemble:]
+
+    if split_part == "ensemble":
+        selected_indices = ensemble_indices
+    else:
+        selected_indices = belief_indices
+
+    split_dataset = Subset(
+        train_dataset,
+        selected_indices,
+    )
+
+    split_info = {
+        "enabled": True,
+        "resolved_part": split_part,
+        "raw_len": n_total,
+        "used_len": len(selected_indices),
+        "ensemble_len": n_ensemble,
+        "belief_len": n_belief,
+        "split_ratio": float(split_ratio),
+        "split_seed": int(split_seed),
+    }
+
+    return split_dataset, split_info
 
 
 def preprocess_internvl2_5_beta_binom(
@@ -1938,6 +2087,32 @@ def main():
         min_num_frame=data_args.min_num_frame,
         max_num_frame=data_args.max_num_frame,
     )
+
+    raw_train_len = len(train_dataset)
+
+    train_dataset, prm_split_info = split_prm_train_dataset(
+        train_dataset=train_dataset,
+        split_enable=bool(data_args.prm_data_split_enable),
+        split_ratio=float(data_args.prm_data_split_ratio),
+        split_seed=int(data_args.prm_data_split_seed),
+        split_part=str(data_args.prm_data_split_part),
+        prm_loss_type=str(model_args.prm_loss_type),
+    )
+
+    if dist.get_rank() == 0:
+        logger.info(
+            "PRM data split: "
+            f"enable={data_args.prm_data_split_enable}, "
+            f"ratio={data_args.prm_data_split_ratio}, "
+            f"seed={data_args.prm_data_split_seed}, "
+            f"requested_part={data_args.prm_data_split_part}, "
+            f"resolved_part={prm_split_info['resolved_part']}, "
+            f"prm_loss_type={model_args.prm_loss_type}, "
+            f"raw_train_len={raw_train_len}, "
+            f"used_train_len={len(train_dataset)}, "
+            f"ensemble_len={prm_split_info['ensemble_len']}, "
+            f"belief_len={prm_split_info['belief_len']}"
+        )
 
     # 在 train_dataset 构建之后新增
     eval_dataset = None

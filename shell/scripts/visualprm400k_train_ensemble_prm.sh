@@ -98,6 +98,14 @@ META_PATH=${META_PATH:-"${REPO_ROOT}/shell/data/meta_visualprm400k_beta_binom.js
 MODEL_PATH=${MODEL_PATH:-"/inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/model/${model_name}"}
 DEEPSPEED_CONFIG=${DEEPSPEED_CONFIG:-"${REPO_ROOT}/configs/zero_stage3_config.json"}
 
+# =========================
+# Optional PRM data split
+# =========================
+PRM_DATA_SPLIT_ENABLE=${PRM_DATA_SPLIT_ENABLE:-False}
+PRM_DATA_SPLIT_RATIO=${PRM_DATA_SPLIT_RATIO:-0.8}
+PRM_DATA_SPLIT_SEED=${PRM_DATA_SPLIT_SEED:-42}
+PRM_DATA_SPLIT_PART=${PRM_DATA_SPLIT_PART:-auto}
+
 NNODES=${NNODES:-1}
 NODE_RANK=${NODE_RANK:-0}
 MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
@@ -212,6 +220,10 @@ python -m torch.distributed.run \
   --ensemble_prm_use_prior_network ${ENSEMBLE_PRM_USE_PRIOR_NETWORK} \
   --ensemble_prm_prior_scale ${ENSEMBLE_PRM_PRIOR_SCALE} \
   --ensemble_prm_bootstrap_prob ${ENSEMBLE_PRM_BOOTSTRAP_PROB} \
+  --prm_data_split_enable ${PRM_DATA_SPLIT_ENABLE} \
+  --prm_data_split_ratio ${PRM_DATA_SPLIT_RATIO} \
+  --prm_data_split_seed ${PRM_DATA_SPLIT_SEED} \
+  --prm_data_split_part ${PRM_DATA_SPLIT_PART} \
   --beta_binom_kappa_min ${BETA_BINOM_KAPPA_MIN} \
   --beta_binom_kappa_init ${BETA_BINOM_KAPPA_INIT} \
   --beta_binom_evi_reg ${BETA_BINOM_EVI_REG} \
