@@ -13,6 +13,14 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Plot signed PRM calibration error distribution."
     )
+    
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="MathVerse",
+        help="support MathVision, Geometry3k, Mavis-Geometry, MathV360K"
+    )
+    
     parser.add_argument(
         "--input",
         type=str,
@@ -22,7 +30,7 @@ def parse_args():
     parser.add_argument(
         "--output",
         type=str,
-        default="outputs/calibration/mathvision/error_distribution_betaprm_checkpoint1103.png",
+        default="outputs/calibration/mathvision/MathVision.pdf",
         help="Output figure path, e.g. error_distribution.png",
     )
     parser.add_argument(
@@ -166,15 +174,15 @@ def compute_statistics(targets, preds, errors, error_definition):
     return stats
 
 
-def plot_distribution(errors, stats, output_path, bins, dpi, title, error_definition):
-    fig, ax = plt.subplots(figsize=(7.0, 4.8))
+def plot_distribution(errors, stats, output_path, bins, dpi, title, error_definition, task):
+    fig, ax = plt.subplots(figsize=(5.0, 4.8))
 
     # Histogram as probability density.
     ax.hist(
         errors,
         bins=bins,
         density=True,
-        alpha=0.25,
+        alpha=0.3,
         edgecolor="none",
         label="Histogram",
     )
@@ -192,7 +200,7 @@ def plot_distribution(errors, stats, output_path, bins, dpi, title, error_defini
         ax.plot(
             xs,
             ys,
-            linewidth=2.0,
+            linewidth=4.5,
             label="Density",
         )
 
@@ -200,40 +208,39 @@ def plot_distribution(errors, stats, output_path, bins, dpi, title, error_defini
     ax.axvline(
         0.0,
         linestyle="--",
-        linewidth=1.5,
+        linewidth=3,
         label="Zero error",
     )
 
     # Mean signed error.
-    mean_error = stats["mean_signed_error"]
-    ax.axvline(
-        mean_error,
-        linestyle=":",
-        linewidth=1.5,
-        label=f"Mean = {mean_error:.3f}",
-    )
+    # mean_error = stats["mean_signed_error"]
+    # ax.axvline(
+    #     mean_error,
+    #     linestyle=":",
+    #     linewidth=1.5,
+    #     label=f"Mean = {mean_error:.3f}",
+    # )
 
     if error_definition == "real_minus_pred":
         xlabel = "Signed Error (Real Success Prob. - PRM Prediction)"
         interpretation = "Negative = Overestimation"
     else:
-        xlabel = "Signed Error (PRM Prediction - Real Success Prob.)"
+        xlabel = "Prediction Error"
         interpretation = "Positive = Overestimation"
 
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("Density")
+    ax.set_xlabel(xlabel, fontsize=22)
+    ax.set_ylabel("Probability Density", fontsize=22)
+    ax.tick_params(axis='both', labelsize=19)
 
     if title is None:
         title = (
-            f"PRM Prediction Error Distribution\n"
-            f"{interpretation}; "
-            f"Overestimation Rate = "
-            f"{100.0 * stats['overestimation_rate']:.1f}%"
+            f"{task}"
         )
 
-    ax.set_title(title)
+    ax.set_title(title, fontsize=24)
 
-    ax.legend()
+    if task == "MathVision":
+        ax.legend(fontsize=19, framealpha=0.8)
     ax.grid(alpha=0.2)
 
     # Probability differences are bounded by [-1, 1].
@@ -243,8 +250,8 @@ def plot_distribution(errors, stats, output_path, bins, dpi, title, error_defini
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    plt.tight_layout()
+    fig.savefig(output_path)
     plt.close(fig)
 
 
@@ -277,6 +284,7 @@ def main():
         dpi=args.dpi,
         title=args.title,
         error_definition=args.error_definition,
+        task=args.task,
     )
 
     print("=== Signed Error Analysis ===")
