@@ -12,7 +12,7 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 def main():
     parser = argparse.ArgumentParser(description="Start a vLLM API server.")
-    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-32B-Instruct")
+    parser.add_argument("--model", type=str, default="/inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/model/Qwen2.5-32B-Instruct")
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8888)
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
