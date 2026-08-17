@@ -282,9 +282,20 @@ def main() -> None:
                 )
 
             label = labels_by_prefix[prefix_id]
+
+            if "target_success_prob" in label:
+                target_key = "target_success_prob"
+            elif "success_prob" in label:
+                target_key = "success_prob"
+            else:
+                raise ValueError(
+                    f"{prefix_id}: missing both "
+                    f"'target_success_prob' and 'success_prob'"
+                )
+
             target_prob = require_probability(
-                label.get("success_prob"),
-                name="success_prob",
+                label[target_key],
+                name=target_key,
                 prefix_id=prefix_id,
             )
             mc_correct = int(label["mc_correct"])

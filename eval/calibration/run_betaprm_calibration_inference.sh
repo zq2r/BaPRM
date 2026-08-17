@@ -18,13 +18,18 @@ MASTER_PORT="${MASTER_PORT:-63731}"
 MINI_BATCH_SIZE="${MINI_BATCH_SIZE:-4}"
 NUM_WORKERS="${NUM_WORKERS:-0}"
 
-CHECKPOINT="${CHECKPOINT:-${REPO_ROOT}/log/beta-InternVL3-8B-visualprm400k/checkpoint-1103}"
+# CHECKPOINT="${CHECKPOINT:-${REPO_ROOT}/log/beta-InternVL3-8B-visualprm400k/checkpoint-1103}"
 
-ANNOTATION="${ANNOTATION:-${REPO_ROOT}/outputs/calibration/mathvision/mathvision_calibration_annotation_with_source_labels.json}"
+# ANNOTATION="${ANNOTATION:-${REPO_ROOT}/outputs/calibration/mathvision/mathvision_calibration_annotation_with_source_labels.json}"
 
-IMAGE_ROOT="${IMAGE_ROOT:-${REPO_ROOT}/datasets/MathVision/extracted_images}"
+# IMAGE_ROOT="${IMAGE_ROOT:-${REPO_ROOT}/datasets/MathVision/extracted_images}"
 
-OUT_DIR="${OUT_DIR:-${REPO_ROOT}/outputs/calibration/mathvision/betaprm_checkpoint1103}"
+# OUT_DIR="${OUT_DIR:-${REPO_ROOT}/outputs/calibration/mathvision/betaprm_checkpoint1103}"
+
+CHECKPOINT="$PWD/log/beta-InternVL3-8B-visualprm400k/checkpoint-1103" 
+ANNOTATION="$PWD/outputs/calibration/visualprm_val/geometry3k_val_annotation_1000.json" 
+IMAGE_ROOT="$PWD/datasets" 
+OUT_DIR="$PWD/outputs/calibration/visualprm_val/betaprm_geometry3k_checkpoint1103" 
 
 if [[ ! -d "${CHECKPOINT}" ]]; then
     echo "[ERROR] Checkpoint does not exist: ${CHECKPOINT}" >&2
