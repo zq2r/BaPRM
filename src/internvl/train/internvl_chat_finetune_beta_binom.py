@@ -27,7 +27,7 @@
 # Data interface notes:
 # - Datasets may provide a top-level prm_counts dict: {'k': [...], 'n': [...]} aligned with '<prm>' steps.
 # - The preprocess builds three aligned channels at '<prm>' positions: labels (ratio), prm_counts_k, prm_counts_n.
-
+import contextlib
 import logging
 import math
 import os
@@ -2235,6 +2235,25 @@ def main():
         tokenizer=tokenizer,
         data_collator=collator,
     )
+
+    # DeepSpeed ZeRO-3 partitions gradients during backward and does not support
+    # the standard no_sync() context used by some Transformers Trainer versions
+    # during gradient accumulation.
+    if (
+        getattr(trainer, 'is_deepspeed_enabled', False)
+        and getattr(trainer.accelerator.state, 'deepspeed_plugin', None) is not None
+        and trainer.accelerator.state.deepspeed_plugin.zero_stage == 3
+    ):
+        def _zero3_safe_no_sync(model):
+            return contextlib.nullcontext()
+
+        trainer.accelerator.no_sync = _zero3_safe_no_sync
+
+        if dist.get_rank() == 0:
+            logger.info(
+                'DeepSpeed ZeRO-3 detected: disabled Accelerator.no_sync '
+                'for gradient accumulation.'
+            )
     
     if model_args.prm_loss_type == 'beta_binom':
         trainer.remove_callback(transformers.integrations.WandbCallback)
