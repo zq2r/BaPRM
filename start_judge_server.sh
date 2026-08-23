@@ -2,14 +2,14 @@
 set -euo pipefail
 set -x
 
-cd /inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/project/Beta-Binomial-PRM
+cd /home/admin/workspace/aop_lab/app_source/BaPRM
 
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 
 # Judge model. Change this path if your Qwen model is elsewhere.
-JUDGE_MODEL=${JUDGE_MODEL:-"/inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/model/Qwen2.5-32B-Instruct"}
+JUDGE_MODEL=${JUDGE_MODEL:-"/home/admin/workspace/aop_lab/app_data/model/Qwen2.5-32B-Instruct"}
 JUDGE_SERVED_NAME=${JUDGE_SERVED_NAME:-"Qwen2.5-32B-Instruct"}
 
 HOST=${HOST:-"127.0.0.1"}

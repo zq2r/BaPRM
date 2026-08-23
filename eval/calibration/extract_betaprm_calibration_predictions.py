@@ -124,7 +124,7 @@ def main() -> None:
     parser.add_argument(
         "--evaluator-output",
         type=Path,
-        default="/inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/project/Beta-Binomial-PRM/outputs/calibration/mathvision/betaprm_checkpoint1103/mathvision_prm_260719083116.json",
+        default="outputs/calibration/mathvision/betaprm_checkpoint1103/mathvision_prm_260719083116.json",
     )
     parser.add_argument(
         "--mc-labels",
@@ -134,7 +134,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default="outputs/calibration/mathvision/predictions_betaprm_checkpoint1103.jsonl")
     parser.add_argument("--summary-output", type=Path, default=None)
     parser.add_argument("--model-name", type=str, default="BetaPRM-InternVL3-8B")
-    parser.add_argument("--checkpoint", type=str, default="/inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/project/Beta-Binomial-PRM/log/beta-InternVL3-8B-visualprm400k/checkpoint-1103")
+    parser.add_argument("--checkpoint", type=str, default="log/beta-InternVL3-8B-visualprm400k/checkpoint-1103")
     parser.add_argument("--expected-prefixes", type=int, default=3513)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()

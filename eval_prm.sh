@@ -4,6 +4,7 @@ set -x
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR}"
+DATASET_ROOT="${DATASET_ROOT:-/home/admin/workspace/aop_lab/app_data/datasets}"
 cd "${REPO_ROOT}"
 
 export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
@@ -117,26 +118,26 @@ run_one_benchmark() {
     MathVista)
       EVAL_SCRIPT="eval/prm/evaluate_mathvista_prm_${SCRIPT_SUFFIX}.py"
       DATASET_NAME="mathvista_prm"
-      DEFAULT_ROOT="datasets/MathVista/extracted_images"
-      DEFAULT_ANNOTATION="datasets/MathVista/MathVista_rollout_annotation_InternVL8B_${ANNOTATION_TAG}.json"
+      DEFAULT_ROOT="${DATASET_ROOT}/MathVista/extracted_images"
+      DEFAULT_ANNOTATION="${DATASET_ROOT}/MathVista/MathVista_rollout_annotation_InternVL8B_${ANNOTATION_TAG}.json"
       ;;
     MathVision)
       EVAL_SCRIPT="eval/prm/evaluate_mathvision_prm_${SCRIPT_SUFFIX}.py"
       DATASET_NAME="mathvision_prm"
-      DEFAULT_ROOT="datasets/MathVision/extracted_images"
-      DEFAULT_ANNOTATION="datasets/MathVision/MathVision_rollout_annotation_InternVL8B_${ANNOTATION_TAG}.json"
+      DEFAULT_ROOT="${DATASET_ROOT}/MathVision/extracted_images"
+      DEFAULT_ANNOTATION="${DATASET_ROOT}/MathVision/MathVision_rollout_annotation_InternVL8B_${ANNOTATION_TAG}.json"
       ;;
     MathVerse)
       EVAL_SCRIPT="eval/prm/evaluate_mathverse_prm_${SCRIPT_SUFFIX}.py"
       DATASET_NAME="mathverse_prm"
-      DEFAULT_ROOT="datasets/MathVerse/extracted_images"
-      DEFAULT_ANNOTATION="datasets/MathVerse/MathVerse_rollout_annotation_InternVL8B_${ANNOTATION_TAG}.json"
+      DEFAULT_ROOT="${DATASET_ROOT}/MathVerse/extracted_images"
+      DEFAULT_ANNOTATION="${DATASET_ROOT}/MathVerse/MathVerse_rollout_annotation_InternVL8B_${ANNOTATION_TAG}.json"
       ;;
     OlympiadBench)
       EVAL_SCRIPT="eval/prm/evaluate_olympiadbench_prm_${SCRIPT_SUFFIX}.py"
       DATASET_NAME="olympiadbench_prm"
       DEFAULT_ROOT="."
-      DEFAULT_ANNOTATION="datasets/OlympiadBench/OlympiadBench_rollout_annotation_InternVL8B_${ANNOTATION_TAG}.json"
+      DEFAULT_ANNOTATION="${DATASET_ROOT}/OlympiadBench/OlympiadBench_rollout_annotation_InternVL8B_${ANNOTATION_TAG}.json"
       ;;
     *)
       echo "ERROR: Unknown benchmark: ${BENCH}"

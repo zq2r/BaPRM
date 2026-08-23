@@ -18,7 +18,7 @@ export MASTER_PORT=${MASTER_PORT:-4319}
 RESUME_TRAINING=${RESUME_TRAINING:-0}
 SAVE_ONLY_MODEL=${SAVE_ONLY_MODEL:-True}
 
-OUTPUT_DIR=${OUTPUT_DIR:-"/inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/project/Beta-Binomial-PRM/log/normal-${model_name}-visualprm400k"}
+OUTPUT_DIR=${OUTPUT_DIR:-"${REPO_ROOT}/log/normal-${model_name}-visualprm400k"}
 if [ ! -d "$OUTPUT_DIR" ]; then
   mkdir -p "$OUTPUT_DIR"
 fi
@@ -60,7 +60,7 @@ PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-2}
 GRADIENT_ACC=$((BATCH_SIZE / PER_DEVICE_BATCH_SIZE / GPUS))
 
 META_PATH=${META_PATH:-"${REPO_ROOT}/shell/data/meta_visualprm400k_beta_binom.json"}
-MODEL_PATH=${MODEL_PATH:-"/inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/model/${model_name}"}
+MODEL_PATH=${MODEL_PATH:-"/home/admin/workspace/aop_lab/app_data/model/${model_name}"}
 DEEPSPEED_CONFIG=${DEEPSPEED_CONFIG:-"${REPO_ROOT}/configs/zero_stage3_config.json"}
 
 NNODES=${NNODES:-1}
@@ -93,7 +93,7 @@ if [ -d "${CUDA_CCCL_INCLUDE}" ]; then
   export CPLUS_INCLUDE_PATH="${CUDA_CCCL_INCLUDE}:${CPLUS_INCLUDE_PATH:-}"
 fi
 
-export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-/inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/cache/torch_extensions}
+export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-${REPO_ROOT}/.cache/torch_extensions}
 mkdir -p "${TORCH_EXTENSIONS_DIR}"
 
 # Beta-Binom PRM hyperparams

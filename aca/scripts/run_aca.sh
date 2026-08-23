@@ -28,12 +28,13 @@ EOF
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+DATASET_ROOT="${DATASET_ROOT:-/home/admin/workspace/aop_lab/app_data/datasets}"
 
 MODE="${MODE:-aca}"
 GEN_MODEL="${GEN_MODEL:-OpenGVLab/InternVL2_5-8B}"
 PRM_CKPT="${PRM_CKPT:-}"
-INPUT_JSON="${INPUT_JSON:-${REPO_ROOT}/datasets/MathVista/seed_dataset.json}"
-IMAGE_ROOT="${IMAGE_ROOT:-${REPO_ROOT}/datasets/MathVista}"
+INPUT_JSON="${INPUT_JSON:-${DATASET_ROOT}/MathVista/seed_dataset.json}"
+IMAGE_ROOT="${IMAGE_ROOT:-${DATASET_ROOT}/MathVista}"
 OUTPUT_JSON="${OUTPUT_JSON:-${REPO_ROOT}/work_dirs/aca_mathvista/out_aca.json}"
 JUDGE_MODEL="${JUDGE_MODEL:-Qwen/Qwen2.5-32B-Instruct}"
 

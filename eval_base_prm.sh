@@ -25,8 +25,9 @@ benchs=${benchs:-"MathVista MathVision OlympiadBench MathVerse"}
 # Supported examples: oversample, oversample_2
 ANNOTATION_TAG=${ANNOTATION_TAG:-"oversample_2"}
 
-MODEL_ROOT="/inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/model"
+MODEL_ROOT="/home/admin/workspace/aop_lab/app_data/model"
 BASE_MODEL="${MODEL_ROOT}/${model_name}"
+DATASET_ROOT="${DATASET_ROOT:-/home/admin/workspace/aop_lab/app_data/datasets}"
 
 GPUS=${GPUS:-4}
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3"}
@@ -135,26 +136,26 @@ run_one_benchmark() {
     MathVista)
       EVAL_SCRIPT="eval/prm/evaluate_mathvista_prm_normal.py"
       DATASET_NAME="mathvista_prm"
-      ROOT="datasets/MathVista/extracted_images"
-      DEFAULT_ANNOTATION="datasets/MathVista/MathVista_rollout_annotation_InternVL8B_${ANNOTATION_TAG}.json"
+      ROOT="${DATASET_ROOT}/MathVista/extracted_images"
+      DEFAULT_ANNOTATION="${DATASET_ROOT}/MathVista/MathVista_rollout_annotation_InternVL8B_${ANNOTATION_TAG}.json"
       ;;
     MathVision)
       EVAL_SCRIPT="eval/prm/evaluate_mathvision_prm_normal.py"
       DATASET_NAME="mathvision_prm"
-      ROOT="datasets/MathVision/extracted_images"
-      DEFAULT_ANNOTATION="datasets/MathVision/MathVision_rollout_annotation_InternVL8B_${ANNOTATION_TAG}.json"
+      ROOT="${DATASET_ROOT}/MathVision/extracted_images"
+      DEFAULT_ANNOTATION="${DATASET_ROOT}/MathVision/MathVision_rollout_annotation_InternVL8B_${ANNOTATION_TAG}.json"
       ;;
     MathVerse)
       EVAL_SCRIPT="eval/prm/evaluate_mathverse_prm_normal.py"
       DATASET_NAME="mathverse_prm"
-      ROOT="datasets/MathVerse/extracted_images"
-      DEFAULT_ANNOTATION="datasets/MathVerse/MathVerse_rollout_annotation_InternVL8B_${ANNOTATION_TAG}.json"
+      ROOT="${DATASET_ROOT}/MathVerse/extracted_images"
+      DEFAULT_ANNOTATION="${DATASET_ROOT}/MathVerse/MathVerse_rollout_annotation_InternVL8B_${ANNOTATION_TAG}.json"
       ;;
     OlympiadBench)
       EVAL_SCRIPT="eval/prm/evaluate_olympiadbench_prm_normal.py"
       DATASET_NAME="olympiadbench_prm"
       ROOT="."
-      DEFAULT_ANNOTATION="datasets/OlympiadBench/OlympiadBench_rollout_annotation_InternVL8B_${ANNOTATION_TAG}.json"
+      DEFAULT_ANNOTATION="${DATASET_ROOT}/OlympiadBench/OlympiadBench_rollout_annotation_InternVL8B_${ANNOTATION_TAG}.json"
       ;;
     *)
       echo "ERROR: Unknown benchmark: ${BENCH}"

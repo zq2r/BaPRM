@@ -2,14 +2,16 @@
 set -euo pipefail
 set -x
 
-cd /inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/project/Beta-Binomial-PRM
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DATASET_ROOT="${DATASET_ROOT:-/home/admin/workspace/aop_lab/app_data/datasets}"
+cd "${REPO_ROOT}"
 
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 
 # Generator model used to sample reasoning rollouts.
-GEN_MODEL=${GEN_MODEL:-"/inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/model/InternVL2_5-8B"}
+GEN_MODEL=${GEN_MODEL:-"/home/admin/workspace/aop_lab/app_data/model/InternVL3-8B"}
 
 # Judge server.
 JUDGE_API_BASE=${JUDGE_API_BASE:-"http://127.0.0.1:8888/v1"}
@@ -27,9 +29,9 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"7"}
 # OlympiadBench: multi-image version
 # =========================
 python -m eval.build_eval_rollouts_annotation_olympiadbench \
-  --input datasets/OlympiadBench/seed_dataset.json \
-  --output datasets/OlympiadBench/OlympiadBench_rollout_annotation_InternVL8B_oversample.json \
-  --image_root datasets/OlympiadBench \
+  --input "${DATASET_ROOT}/OlympiadBench/seed_dataset.json" \
+  --output "${DATASET_ROOT}/OlympiadBench/OlympiadBench_rollout_annotation_InternVL8B_oversample.json" \
+  --image_root "${DATASET_ROOT}/OlympiadBench" \
   --generator_model "${GEN_MODEL}" \
   --num_rollouts "${NUM_ROLLOUTS}" \
   --judge_api_base "${JUDGE_API_BASE}" \
