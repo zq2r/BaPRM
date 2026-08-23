@@ -13,7 +13,7 @@ export HF_DATASETS_OFFLINE=1
 # hyperparameters needed to specify
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3"}
 GPUS=${GPUS:-4}
-model_name=${model_name:-"InternVL3-8B"}
+model_name=${model_name:-"InternVL2_5-8B"}
 export MASTER_PORT=${MASTER_PORT:-4321}
 RESUME_TRAINING=${RESUME_TRAINING:-0}
 SAVE_ONLY_MODEL=${SAVE_ONLY_MODEL:-True}
@@ -43,7 +43,10 @@ else
   rm -rf "${OUTPUT_DIR}"/checkpoint-*
 fi
 
-
+PRM_DATA_SPLIT_ENABLE=${PRM_DATA_SPLIT_ENABLE:-True}
+PRM_DATA_SPLIT_RATIO=${PRM_DATA_SPLIT_RATIO:-0.8}
+PRM_DATA_SPLIT_SEED=${PRM_DATA_SPLIT_SEED:-42}
+PRM_DATA_SPLIT_PART=${PRM_DATA_SPLIT_PART:-ensemble} # ensemble, all
 
 export WANDB_MODE=offline
 export WANDB_PROJECT=${WANDB_PROJECT:-"Beta-PRM"}
@@ -117,6 +120,10 @@ python -m torch.distributed.run \
   --output_dir ${OUTPUT_DIR} \
   "${RESUME_ARGS[@]}" \
   --meta_path "${META_PATH}" \
+  --prm_data_split_enable ${PRM_DATA_SPLIT_ENABLE} \
+  --prm_data_split_ratio ${PRM_DATA_SPLIT_RATIO} \
+  --prm_data_split_seed ${PRM_DATA_SPLIT_SEED} \
+  --prm_data_split_part ${PRM_DATA_SPLIT_PART} \
   --overwrite_output_dir True \
   --force_image_size 448 \
   --max_dynamic_patch 6 \

@@ -17,7 +17,7 @@ def parse_args():
     parser.add_argument(
         "--task",
         type=str,
-        default="MathVerse",
+        default="MathV360K",
         help="support MathVision, Geometry3k, Mavis-Geometry, MathV360K"
     )
     
