@@ -140,7 +140,7 @@ python -m torch.distributed.run \
   --gradient_accumulation_steps ${GRADIENT_ACC} \
   --save_strategy "steps" \
   --save_only_model ${SAVE_ONLY_MODEL} \
-  --save_steps 500 \
+  --save_steps 50 \
   --save_total_limit 1 \
   --learning_rate 1e-5 \
   --weight_decay 0.05 \

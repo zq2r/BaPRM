@@ -539,13 +539,34 @@ class InternVLChatModel(PreTrainedModel):
             if ignore_flag:
                 loss = loss * 0.0
         elif labels is not None:
+            prm_loss_type = getattr(self, "prm_loss_type", "beta_binom")
+
+            use_beta_binom = (
+                prm_loss_type == "beta_binom"
+                and prm_counts_k is not None
+                and prm_counts_n is not None
+            )
+            use_ensemble_prm = prm_loss_type == "ensemble_prm"
+            use_bayesian_prm = prm_loss_type == "bayesian_prm"
+            uses_aux_prm_head = (
+                use_beta_binom
+                or use_ensemble_prm
+                or use_bayesian_prm
+            )
+
             placeholder_mask = input_ids == self.prm_token_id
             selected_logits = logits.contiguous().view(
                 -1, self.language_model.config.vocab_size
             )[placeholder_mask]
             selected_labels = labels.contiguous().view(-1)[placeholder_mask]
             selected_logits = selected_logits[..., self.reward_token_ids]
-            if selected_logits.size(0) == 0:
+
+            # DeepSpeed ZeRO-3 safety:
+            # If the active PRM mode owns an auxiliary head, do not return
+            # early merely because this rank has no <prm> token. Each PRM
+            # branch below performs a dummy forward through its active head(s)
+            # so every rank follows the same parameterized module path.
+            if selected_logits.size(0) == 0 and not uses_aux_prm_head:
                 loss = logits.sum() * 0.0
                 if ignore_flag:
                     loss = loss * 0.0
@@ -559,16 +580,6 @@ class InternVLChatModel(PreTrainedModel):
                     hidden_states=outputs.hidden_states,
                     attentions=outputs.attentions,
                 )
-
-            prm_loss_type = getattr(self, "prm_loss_type", "beta_binom")
-
-            use_beta_binom = (
-                prm_loss_type == "beta_binom"
-                and prm_counts_k is not None
-                and prm_counts_n is not None
-            )
-            use_ensemble_prm = prm_loss_type == "ensemble_prm"
-            use_bayesian_prm = prm_loss_type == "bayesian_prm"
             
             if use_ensemble_prm:
                 if last_hidden_state is None:
@@ -584,29 +595,31 @@ class InternVLChatModel(PreTrainedModel):
                     )
 
                 flat_prm_mask = placeholder_mask.contiguous().view(-1)
-
                 last_h = last_hidden_state.contiguous().view(
                     -1, last_hidden_state.shape[-1]
                 )
-                prm_h = last_h[flat_prm_mask]  # [M, H]
+                prm_h_all = last_h[flat_prm_mask]  # [M, H], possibly empty
 
-                if prm_h.numel() == 0:
-                    loss = logits.sum() * 0.0
-                    with torch.no_grad():
-                        self._beta_last_stats = {
-                            "ensemble_prm_loss": 0.0,
-                            "ensemble_reward_mean": 0.0,
-                            "ensemble_reward_std": 0.0,
-                            "ensemble_target_mean": 0.0,
-                            "valid_prm_count": 0.0,
-                        }
+                has_prm = prm_h_all.size(0) > 0
+
+                if has_prm:
+                    prm_h = prm_h_all
                 else:
+                    # DeepSpeed ZeRO-3 safety: execute the active head on every
+                    # rank even when this rank has no PRM supervision.
+                    prm_h = last_h[:1]
+
+                # ALWAYS execute ensemble_prm_head exactly once on every rank.
+                ensemble_logits = self.ensemble_prm_head(prm_h)
+
+                if has_prm:
                     # selected_labels: [M], soft PRM target in [0, 1], usually K / N.
-                    target = selected_labels.to(device=prm_h.device, dtype=torch.float32).clamp(0.0, 1.0)
+                    target = selected_labels.to(
+                        device=prm_h.device,
+                        dtype=torch.float32,
+                    ).clamp(0.0, 1.0)
 
                     # ensemble_logits: [E, M]
-                    ensemble_logits = self.ensemble_prm_head(prm_h)
-
                     # target_expand: [E, M]
                     target_expand = target[None, :].expand_as(ensemble_logits)
 
@@ -617,7 +630,9 @@ class InternVLChatModel(PreTrainedModel):
                         reduction="none",
                     )
 
-                    bootstrap_prob = float(getattr(self, "ensemble_prm_bootstrap_prob", 1.0))
+                    bootstrap_prob = float(
+                        getattr(self, "ensemble_prm_bootstrap_prob", 1.0)
+                    )
 
                     if self.training and bootstrap_prob < 1.0:
                         bootstrap_mask = (
@@ -625,7 +640,9 @@ class InternVLChatModel(PreTrainedModel):
                         ).float()
 
                         denom = bootstrap_mask.sum().clamp_min(1.0)
-                        cls_loss = (loss_per_head.float() * bootstrap_mask).sum() / denom
+                        cls_loss = (
+                            loss_per_head.float() * bootstrap_mask
+                        ).sum() / denom
                     else:
                         bootstrap_mask = None
                         cls_loss = loss_per_head.mean()
@@ -633,16 +650,31 @@ class InternVLChatModel(PreTrainedModel):
                     loss = cls_loss
 
                     with torch.no_grad():
-                        ensemble_probs = torch.sigmoid(ensemble_logits.float())  # [E, M]
+                        ensemble_probs = torch.sigmoid(
+                            ensemble_logits.float()
+                        )  # [E, M]
                         reward_mean = ensemble_probs.mean(dim=0)  # [M]
-                        reward_std = ensemble_probs.std(dim=0, unbiased=False)  # [M]
+                        reward_std = ensemble_probs.std(
+                            dim=0,
+                            unbiased=False,
+                        )  # [M]
 
                         stats = {
-                            "ensemble_prm_loss": float(cls_loss.detach().item()),
-                            "ensemble_reward_mean": float(reward_mean.mean().detach().item()),
-                            "ensemble_reward_std": float(reward_std.mean().detach().item()),
-                            "ensemble_target_mean": float(target.mean().detach().item()),
-                            "ensemble_bootstrap_prob": float(bootstrap_prob),
+                            "ensemble_prm_loss": float(
+                                cls_loss.detach().item()
+                            ),
+                            "ensemble_reward_mean": float(
+                                reward_mean.mean().detach().item()
+                            ),
+                            "ensemble_reward_std": float(
+                                reward_std.mean().detach().item()
+                            ),
+                            "ensemble_target_mean": float(
+                                target.mean().detach().item()
+                            ),
+                            "ensemble_bootstrap_prob": float(
+                                bootstrap_prob
+                            ),
                             "valid_prm_count": float(prm_h.size(0)),
                         }
 
@@ -652,6 +684,37 @@ class InternVLChatModel(PreTrainedModel):
                             )
 
                         self._beta_last_stats = stats
+                else:
+                    # Numerically zero loss, but keep the ensemble head in the
+                    # autograd graph so its trainable parameters get zero
+                    # gradients instead of being absent on this rank.
+                    loss = (
+                        logits.sum() * 0.0
+                        + ensemble_logits.sum() * 0.0
+                    )
+
+                    with torch.no_grad():
+                        self._beta_last_stats = {
+                            "ensemble_prm_loss": 0.0,
+                            "ensemble_reward_mean": 0.0,
+                            "ensemble_reward_std": 0.0,
+                            "ensemble_target_mean": 0.0,
+                            "ensemble_bootstrap_prob": float(
+                                getattr(
+                                    self,
+                                    "ensemble_prm_bootstrap_prob",
+                                    1.0,
+                                )
+                            ),
+                            "valid_prm_count": 0.0,
+                        }
+
+                    if torch.distributed.is_initialized():
+                        print(
+                            f'[ensemble-prm][rank={torch.distributed.get_rank()}] '
+                            f'no PRM in this micro-batch; '
+                            f'using dummy ensemble head forward'
+                        )
 
             elif use_bayesian_prm:
                 if prm_counts_k is None or prm_counts_n is None:
@@ -682,84 +745,62 @@ class InternVLChatModel(PreTrainedModel):
                 last_h = last_hidden_state.contiguous().view(
                     -1, last_hidden_state.shape[-1]
                 )
-                prm_h_all = last_h[flat_prm_mask]  # [P_all, H]
+                prm_h_all = last_h[flat_prm_mask]  # [P_all, H], possibly empty
 
-                selected_k = prm_counts_k.contiguous().view(-1)[placeholder_mask]
-                selected_n = prm_counts_n.contiguous().view(-1)[placeholder_mask]
+                selected_k_all = prm_counts_k.contiguous().view(-1)[placeholder_mask]
+                selected_n_all = prm_counts_n.contiguous().view(-1)[placeholder_mask]
 
                 valid_kn = (
-                    (selected_n > 0)
-                    & (selected_k >= 0)
-                    & (selected_k <= selected_n)
+                    (selected_n_all > 0)
+                    & (selected_k_all >= 0)
+                    & (selected_k_all <= selected_n_all)
                 )
 
-                if (prm_h_all.numel() == 0) or (not valid_kn.any()):
-                    loss = logits.sum() * 0.0
-                    with torch.no_grad():
-                        self._beta_last_stats = {
-                            "bayesian_prm_loss": 0.0,
-                            "bayesian_expected_loglik": 0.0,
-                            "bayesian_kl": 0.0,
+                has_valid_prm = (
+                    prm_h_all.size(0) > 0
+                    and bool(valid_kn.any().item())
+                )
 
-                            # Final posterior stats. When conservatism is disabled,
-                            # final posterior equals reliability posterior.
-                            "bayesian_entropy": 0.0,
-                            "bayesian_weight_top1_mean": 0.0,
-                            "bayesian_weight_max": 0.0,
-                            "bayesian_weight_min": 0.0,
-                            "bayesian_reward_mean": 0.0,
-                            "bayesian_reward_std": 0.0,
-                            "bayesian_uncertainty_mean": 0.0,
-
-                            # Explicit reliability / hybrid stats.
-                            "bayesian_rel_reward_mean": 0.0,
-                            "bayesian_post_reward_mean": 0.0,
-                            "bayesian_rel_entropy": 0.0,
-                            "bayesian_post_entropy": 0.0,
-
-                            # Conservatism settings.
-                            "bayesian_use_conservatism": float(
-                                bool(getattr(self, "belief_use_conservatism", False))
-                            ),
-                            "bayesian_conservatism_active": 0.0,
-                            "bayesian_hybrid_lambda": float(
-                                getattr(self, "belief_hybrid_lambda", 1.0)
-                            ),
-                            "bayesian_conservatism_beta": float(
-                                getattr(self, "belief_conservatism_beta", 0.1)
-                            ),
-
-                            "valid_prm_count": 0.0,
-                        }
-                else:
+                if has_valid_prm:
                     prm_h = prm_h_all[valid_kn]  # [P, H]
-                    selected_k = selected_k[valid_kn].to(
-                        device=prm_h.device, dtype=torch.float32
+                    selected_k = selected_k_all[valid_kn].to(
+                        device=prm_h.device,
+                        dtype=torch.float32,
                     )
-                    selected_n = selected_n[valid_kn].to(
-                        device=prm_h.device, dtype=torch.float32
+                    selected_n = selected_n_all[valid_kn].to(
+                        device=prm_h.device,
+                        dtype=torch.float32,
+                    )
+                else:
+                    # DeepSpeed ZeRO-3 safety: all ranks must execute the same
+                    # auxiliary modules. Use one guaranteed non-empty hidden
+                    # state when this rank has no valid PRM supervision.
+                    prm_h = last_h[:1]
+                    selected_k = None
+                    selected_n = None
+
+                # ALWAYS execute the frozen ensemble head exactly once on every
+                # rank. Even though it is frozen, ZeRO-3 may still manage its
+                # parameter all-gather/access sequence.
+                with torch.no_grad():
+                    ensemble_logits = self.ensemble_prm_head(prm_h.detach())
+                    ensemble_probs = torch.sigmoid(
+                        ensemble_logits.float()
+                    ).clamp(
+                        self.beta_binom_eps,
+                        1.0 - self.beta_binom_eps,
                     )
 
-                    # Frozen ensemble likelihood source.
-                    # ensemble_logits: [E, P]
-                    with torch.no_grad():
-                        ensemble_logits = self.ensemble_prm_head(prm_h.detach())
-                        ensemble_probs = torch.sigmoid(ensemble_logits.float()).clamp(
-                            self.beta_binom_eps,
-                            1.0 - self.beta_binom_eps,
-                        )
+                # mu: [P, E], where E is the number of ensemble heads.
+                mu = ensemble_probs.transpose(0, 1).contiguous()
 
-                    # mu: [P, E], where E is the number of ensemble heads.
-                    mu = ensemble_probs.transpose(0, 1).contiguous()
+                # ALWAYS execute the trainable belief head exactly once on every rank.
+                belief_logits = self.belief_head(
+                    prm_h.detach(),
+                    mu.detach(),
+                )  # [P, E]
 
-                    # Train only the belief network through this loss.  We detach the
-                    # marker hidden states so the belief ELBO does not update the reward
-                    # LLM/projector through prm_h.
-                    belief_logits = self.belief_head(
-                        prm_h.detach(),
-                        mu.detach(),
-                    )  # [P, E]
-
+                if has_valid_prm:
                     # Reliability posterior:
                     # alpha_rel = q_phi(z=m | c_t).
                     #
@@ -780,7 +821,10 @@ class InternVLChatModel(PreTrainedModel):
                     )
 
                     if bool(getattr(self, "belief_loglik_normalize_by_n", True)):
-                        log_lik = log_lik / selected_n[:, None].clamp_min(1.0)
+                        log_lik = (
+                            log_lik
+                            / selected_n[:, None].clamp_min(1.0)
+                        )
 
                     # Reliability-posterior ELBO loss.
                     # Do NOT use post_weights here; otherwise the belief head would no
@@ -795,7 +839,10 @@ class InternVLChatModel(PreTrainedModel):
                     # KL(q_phi(z|c) || Uniform(z)) = sum_m w_m log(M w_m)
                     kl_to_uniform = (
                         rel_weights
-                        * (log_rel_weights + math.log(float(num_heads)))
+                        * (
+                            log_rel_weights
+                            + math.log(float(num_heads))
+                        )
                     ).sum(dim=-1)
 
                     belief_beta_kl = float(
@@ -803,7 +850,8 @@ class InternVLChatModel(PreTrainedModel):
                     )
 
                     bayesian_prm_loss = (
-                        -expected_loglik + belief_beta_kl * kl_to_uniform
+                        -expected_loglik
+                        + belief_beta_kl * kl_to_uniform
                     ).mean()
 
                     loss = bayesian_prm_loss
@@ -813,13 +861,25 @@ class InternVLChatModel(PreTrainedModel):
                         # Conservative posterior and final hybrid posterior.
                         # --------------------------------------------------------------
                         use_conservatism = bool(
-                            getattr(self, "belief_use_conservatism", False)
+                            getattr(
+                                self,
+                                "belief_use_conservatism",
+                                False,
+                            )
                         )
                         hybrid_lambda = float(
-                            getattr(self, "belief_hybrid_lambda", 1.0)
+                            getattr(
+                                self,
+                                "belief_hybrid_lambda",
+                                1.0,
+                            )
                         )
                         conservatism_beta = float(
-                            getattr(self, "belief_conservatism_beta", 0.1)
+                            getattr(
+                                self,
+                                "belief_conservatism_beta",
+                                0.1,
+                            )
                         )
 
                         if use_conservatism and hybrid_lambda < 1.0:
@@ -847,10 +907,13 @@ class InternVLChatModel(PreTrainedModel):
 
                             # Numerical safety. Mathematically the convex combination already
                             # sums to one, but renormalization prevents tiny fp errors.
-                            post_weights = post_weights / post_weights.sum(
-                                dim=-1,
-                                keepdim=True,
-                            ).clamp_min(self.beta_binom_eps)
+                            post_weights = (
+                                post_weights
+                                / post_weights.sum(
+                                    dim=-1,
+                                    keepdim=True,
+                                ).clamp_min(self.beta_binom_eps)
+                            )
 
                             conservatism_active = 1.0
                         else:
@@ -861,22 +924,29 @@ class InternVLChatModel(PreTrainedModel):
                         # --------------------------------------------------------------
                         # Reliability reward and final hybrid reward.
                         # --------------------------------------------------------------
-                        rel_reward_mean = (rel_weights * mu).sum(dim=-1)  # [P]
-                        post_reward_mean = (post_weights * mu).sum(dim=-1)  # [P]
+                        rel_reward_mean = (
+                            rel_weights * mu
+                        ).sum(dim=-1)  # [P]
+                        post_reward_mean = (
+                            post_weights * mu
+                        ).sum(dim=-1)  # [P]
 
                         # By convention, legacy fields without "rel_" or "post_" refer to
                         # the final posterior used for reward computation.
                         reward_mean = post_reward_mean
 
                         weighted_var = (
-                            post_weights * (mu - reward_mean[:, None]).pow(2)
+                            post_weights
+                            * (mu - reward_mean[:, None]).pow(2)
                         ).sum(dim=-1)
                         weighted_uncertainty = torch.sqrt(
                             weighted_var.clamp_min(0.0)
                         )
 
                         log_post_weights = torch.log(
-                            post_weights.clamp_min(self.beta_binom_eps)
+                            post_weights.clamp_min(
+                                self.beta_binom_eps
+                            )
                         )
 
                         rel_entropy = -(
@@ -887,7 +957,9 @@ class InternVLChatModel(PreTrainedModel):
                             post_weights * log_post_weights
                         ).sum(dim=-1)
 
-                        top1_weight = post_weights.max(dim=-1).values
+                        top1_weight = post_weights.max(
+                            dim=-1
+                        ).values
 
                         stats = {
                             "bayesian_prm_loss": float(
@@ -917,10 +989,14 @@ class InternVLChatModel(PreTrainedModel):
                                 reward_mean.mean().detach().item()
                             ),
                             "bayesian_reward_std": float(
-                                reward_mean.std(unbiased=False).detach().item()
+                                reward_mean.std(
+                                    unbiased=False
+                                ).detach().item()
                             ),
                             "bayesian_uncertainty_mean": float(
-                                weighted_uncertainty.mean().detach().item()
+                                weighted_uncertainty.mean()
+                                .detach()
+                                .item()
                             ),
 
                             # Explicit reliability / hybrid reward stats.
@@ -928,7 +1004,9 @@ class InternVLChatModel(PreTrainedModel):
                                 rel_reward_mean.mean().detach().item()
                             ),
                             "bayesian_post_reward_mean": float(
-                                post_reward_mean.mean().detach().item()
+                                post_reward_mean.mean()
+                                .detach()
+                                .item()
                             ),
                             "bayesian_rel_entropy": float(
                                 rel_entropy.mean().detach().item()
@@ -952,31 +1030,46 @@ class InternVLChatModel(PreTrainedModel):
                             ),
 
                             "bayesian_target_mean": float(
-                                (selected_k / selected_n).mean().detach().item()
+                                (selected_k / selected_n)
+                                .mean()
+                                .detach()
+                                .item()
                             ),
                             "valid_prm_count": float(prm_h.size(0)),
                         }
 
                         if con_weights is not None:
-                            con_reward_mean = (con_weights * mu).sum(dim=-1)
+                            con_reward_mean = (
+                                con_weights * mu
+                            ).sum(dim=-1)
                             log_con_weights = torch.log(
-                                con_weights.clamp_min(self.beta_binom_eps)
+                                con_weights.clamp_min(
+                                    self.beta_binom_eps
+                                )
                             )
                             con_entropy = -(
                                 con_weights * log_con_weights
                             ).sum(dim=-1)
-                            con_top1_weight = con_weights.max(dim=-1).values
+                            con_top1_weight = con_weights.max(
+                                dim=-1
+                            ).values
 
                             stats.update(
                                 {
                                     "bayesian_con_reward_mean": float(
-                                        con_reward_mean.mean().detach().item()
+                                        con_reward_mean.mean()
+                                        .detach()
+                                        .item()
                                     ),
                                     "bayesian_con_entropy": float(
-                                        con_entropy.mean().detach().item()
+                                        con_entropy.mean()
+                                        .detach()
+                                        .item()
                                     ),
                                     "bayesian_con_weight_top1_mean": float(
-                                        con_top1_weight.mean().detach().item()
+                                        con_top1_weight.mean()
+                                        .detach()
+                                        .item()
                                     ),
                                     "bayesian_con_reward_delta": float(
                                         (
@@ -994,92 +1087,273 @@ class InternVLChatModel(PreTrainedModel):
                             )
 
                         self._beta_last_stats = stats
+                else:
+                    # Keep the trainable belief head in the autograd graph with
+                    # a numerically zero contribution. The frozen ensemble head
+                    # was still executed above to keep ZeRO parameter access
+                    # consistent across ranks.
+                    loss = (
+                        logits.sum() * 0.0
+                        + belief_logits.sum() * 0.0
+                    )
+
+                    with torch.no_grad():
+                        self._beta_last_stats = {
+                            "bayesian_prm_loss": 0.0,
+                            "bayesian_expected_loglik": 0.0,
+                            "bayesian_kl": 0.0,
+
+                            "bayesian_entropy": 0.0,
+                            "bayesian_weight_top1_mean": 0.0,
+                            "bayesian_weight_max": 0.0,
+                            "bayesian_weight_min": 0.0,
+                            "bayesian_reward_mean": 0.0,
+                            "bayesian_reward_std": 0.0,
+                            "bayesian_uncertainty_mean": 0.0,
+
+                            "bayesian_rel_reward_mean": 0.0,
+                            "bayesian_post_reward_mean": 0.0,
+                            "bayesian_rel_entropy": 0.0,
+                            "bayesian_post_entropy": 0.0,
+
+                            "bayesian_use_conservatism": float(
+                                bool(
+                                    getattr(
+                                        self,
+                                        "belief_use_conservatism",
+                                        False,
+                                    )
+                                )
+                            ),
+                            "bayesian_conservatism_active": 0.0,
+                            "bayesian_hybrid_lambda": float(
+                                getattr(
+                                    self,
+                                    "belief_hybrid_lambda",
+                                    1.0,
+                                )
+                            ),
+                            "bayesian_conservatism_beta": float(
+                                getattr(
+                                    self,
+                                    "belief_conservatism_beta",
+                                    0.1,
+                                )
+                            ),
+
+                            "valid_prm_count": 0.0,
+                        }
+
+                    if torch.distributed.is_initialized():
+                        print(
+                            f'[bayesian-prm][rank={torch.distributed.get_rank()}] '
+                            f'no valid PRM in this micro-batch; '
+                            f'using dummy ensemble/belief head forward'
+                        )
 
             elif use_beta_binom:
                 selected_k = prm_counts_k.contiguous().view(-1)[placeholder_mask]
                 selected_n = prm_counts_n.contiguous().view(-1)[placeholder_mask]
-                valid_kn = (selected_n > 0) & (selected_k >= 0) & (selected_k <= selected_n)
+                valid_kn = (
+                    (selected_n > 0)
+                    & (selected_k >= 0)
+                    & (selected_k <= selected_n)
+                )
 
-                if valid_kn.any():
-                    # mu is computed from Yes/No logits (as in non-beta PRM) to preserve discriminative signal.
+                if last_hidden_state is None:
+                    raise RuntimeError(
+                        "beta-binom loss requires last_hidden_state for kappa_head."
+                    )
+
+                last_h = last_hidden_state.contiguous().view(
+                    -1, last_hidden_state.shape[-1]
+                )
+                prm_h_all = last_h[placeholder_mask]
+
+                # DeepSpeed ZeRO-3 safety:
+                # Every rank must execute kappa_head exactly once on every
+                # micro-batch, irrespective of whether this rank has valid
+                # Beta-Binomial supervision.
+                has_valid_kn = bool(valid_kn.any().item())
+
+                if has_valid_kn:
+                    prm_h = prm_h_all[valid_kn]
+                else:
+                    # Guaranteed non-empty dummy hidden state.
+                    prm_h = last_h[:1]
+
+                # ALWAYS execute kappa_head exactly once on every rank.
+                z_kappa = self.kappa_head(prm_h).squeeze(-1)
+
+                if has_valid_kn:
+                    # mu is computed from Yes/No logits (as in non-beta PRM)
+                    # to preserve the discriminative signal.
                     selected_logits = selected_logits[valid_kn]
-                    selected_k = selected_k[valid_kn].to(selected_logits.dtype)
-                    selected_n = selected_n[valid_kn].to(selected_logits.dtype)
+                    selected_k = selected_k[valid_kn].to(
+                        selected_logits.dtype
+                    )
+                    selected_n = selected_n[valid_kn].to(
+                        selected_logits.dtype
+                    )
 
                     mu = F.softmax(selected_logits, dim=-1)[:, 0]
-
-                    if last_hidden_state is None:
-                        raise RuntimeError("beta-binom loss requires last_hidden_state for kappa_head.")
-                    last_h = last_hidden_state.contiguous().view(
-                        -1, last_hidden_state.shape[-1]
+                    kappa = (
+                        F.softplus(z_kappa)
+                        + self.beta_binom_kappa_min
                     )
-                    prm_h = last_h[placeholder_mask][valid_kn]
-                    z_kappa = self.kappa_head(prm_h).squeeze(-1)
-                    kappa = F.softplus(z_kappa) + self.beta_binom_kappa_min
 
                     alpha = mu * kappa + self.beta_binom_eps
-                    beta = (1 - mu) * kappa + self.beta_binom_eps
+                    beta = (
+                        (1 - mu) * kappa
+                        + self.beta_binom_eps
+                    )
 
                     # log C(N, K)
                     log_comb = (
                         torch.lgamma(selected_n + 1)
                         - torch.lgamma(selected_k + 1)
-                        - torch.lgamma(selected_n - selected_k + 1)
+                        - torch.lgamma(
+                            selected_n - selected_k + 1
+                        )
                     )
+
                     # log B(K+alpha, N-K+beta) - log B(alpha, beta)
                     log_beta_num = (
                         torch.lgamma(selected_k + alpha)
-                        + torch.lgamma(selected_n - selected_k + beta)
-                        - torch.lgamma(selected_n + alpha + beta)
+                        + torch.lgamma(
+                            selected_n - selected_k + beta
+                        )
+                        - torch.lgamma(
+                            selected_n + alpha + beta
+                        )
                     )
                     log_beta_den = (
                         torch.lgamma(alpha)
                         + torch.lgamma(beta)
                         - torch.lgamma(alpha + beta)
                     )
-                    log_prob = log_comb + log_beta_num - log_beta_den
+                    log_prob = (
+                        log_comb
+                        + log_beta_num
+                        - log_beta_den
+                    )
                     beta_binom_nll = -log_prob.mean()
 
-                    # Evidence regularization: when mu disagrees with observed ratio (K/N), push kappa down.
-                    # Detach mu so this term only trains kappa and doesn't force mu to chase noisy ratios.
+                    # Evidence regularization: when mu disagrees with observed
+                    # ratio K/N, push kappa down. Detach mu so this term only
+                    # trains kappa and does not force mu to chase noisy ratios.
                     ratio = selected_k / selected_n
-                    evi = (torch.abs(mu.detach() - ratio) * kappa).mean()
-                    evi_reg = float(getattr(self, 'beta_binom_evi_reg', 0.0)) * evi
+                    evi = (
+                        torch.abs(mu.detach() - ratio)
+                        * kappa
+                    ).mean()
+                    evi_reg = (
+                        float(
+                            getattr(
+                                self,
+                                'beta_binom_evi_reg',
+                                0.0,
+                            )
+                        )
+                        * evi
+                    )
                     loss = beta_binom_nll + evi_reg
+
                     with torch.no_grad():
                         linear = self.kappa_head[-1]
                         self._beta_last_stats = {
-                            'beta_binom_nll': float(beta_binom_nll.detach().item()),
-                            'beta_binom_evi': float(evi.detach().item()),
-                            'beta_binom_evi_reg': float(evi_reg.detach().item()),
-                            'kappa_mean': float(kappa.mean().detach().item()),
-                            'kappa_p90': float(
-                                torch.quantile(kappa.detach().float(), 0.9).item()
+                            'beta_binom_nll': float(
+                                beta_binom_nll.detach().item()
                             ),
-                            'kappa_head_w_abs_mean': float(linear.weight.detach().abs().mean().float().item()),
-                            'kappa_head_b_mean': float(linear.bias.detach().mean().float().item()),
-                            'mu_mean': float(mu.mean().detach().item()),
-                            'mu_std': float(mu.std(unbiased=False).detach().item()),
-                            'valid_prm_count': float(selected_k.numel()),
+                            'beta_binom_evi': float(
+                                evi.detach().item()
+                            ),
+                            'beta_binom_evi_reg': float(
+                                evi_reg.detach().item()
+                            ),
+                            'kappa_mean': float(
+                                kappa.mean().detach().item()
+                            ),
+                            'kappa_p90': float(
+                                torch.quantile(
+                                    kappa.detach().float(),
+                                    0.9,
+                                ).item()
+                            ),
+                            'kappa_head_w_abs_mean': float(
+                                linear.weight.detach()
+                                .abs()
+                                .mean()
+                                .float()
+                                .item()
+                            ),
+                            'kappa_head_b_mean': float(
+                                linear.bias.detach()
+                                .mean()
+                                .float()
+                                .item()
+                            ),
+                            'mu_mean': float(
+                                mu.mean().detach().item()
+                            ),
+                            'mu_std': float(
+                                mu.std(
+                                    unbiased=False
+                                ).detach().item()
+                            ),
+                            'valid_prm_count': float(
+                                selected_k.numel()
+                            ),
                         }
 
                     if (
                         torch.distributed.is_initialized()
                         and torch.distributed.get_rank() == 0
-                        and self._beta_debug_steps % self.beta_debug_interval == 0
+                        and self._beta_debug_steps
+                        % self.beta_debug_interval == 0
                     ):
                         linear = self.kappa_head[-1]
                         print(
-                            f'[beta-binom] step={self._beta_debug_steps} '
+                            f'[beta-binom] '
+                            f'step={self._beta_debug_steps} '
                             f'num_prm={selected_k.numel()} '
                             f'mu_mean={mu.mean().item():.4f} '
                             f'kappa_mean={kappa.mean().item():.4f} '
                             f'kappa_max={kappa.max().item():.4f} '
-                            f'kappa_head_b={linear.bias.detach().mean().float().item():.4f}'
+                            f'kappa_head_b='
+                            f'{linear.bias.detach().mean().float().item():.4f}'
                         )
-                    self._beta_debug_steps += 1
                 else:
-                    use_beta_binom = False
+                    # Numerically zero loss, but both the backbone/logit path
+                    # and kappa_head remain in the autograd graph.
+                    loss = (
+                        logits.sum() * 0.0
+                        + z_kappa.sum() * 0.0
+                    )
+
+                    with torch.no_grad():
+                        self._beta_last_stats = {
+                            'beta_binom_nll': 0.0,
+                            'beta_binom_evi': 0.0,
+                            'beta_binom_evi_reg': 0.0,
+                            'kappa_mean': 0.0,
+                            'kappa_p90': 0.0,
+                            'kappa_head_w_abs_mean': 0.0,
+                            'kappa_head_b_mean': 0.0,
+                            'mu_mean': 0.0,
+                            'mu_std': 0.0,
+                            'valid_prm_count': 0.0,
+                        }
+
+                    if torch.distributed.is_initialized():
+                        print(
+                            f'[beta-binom][rank={torch.distributed.get_rank()}] '
+                            f'no valid PRM in this micro-batch; '
+                            f'using dummy kappa_head forward'
+                        )
+
+                # Count every Beta-Binomial micro-batch, including empty ones.
+                self._beta_debug_steps += 1
 
             else:
                 loss_fct = CrossEntropyLoss()
@@ -1469,4 +1743,4 @@ class InternVLChatModel(PreTrainedModel):
         return self.language_model.get_input_embeddings()
 
     def get_output_embeddings(self):
-        return self.language_model.get_output_embeddings()
+        return self.language_model.get_output_embeddings
