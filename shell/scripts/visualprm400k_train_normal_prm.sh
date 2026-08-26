@@ -5,6 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
+#暂时规避nvls无法启动的问题，换个机器就可以尝试去掉
+export NCCL_NVLS_ENABLE=0
+
 # Offline setting
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
@@ -15,8 +18,8 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3"}
 GPUS=${GPUS:-4}
 model_name=${model_name:-"InternVL3-8B"}
 export MASTER_PORT=${MASTER_PORT:-4319}
-RESUME_TRAINING=${RESUME_TRAINING:-0}
-SAVE_ONLY_MODEL=${SAVE_ONLY_MODEL:-True}
+RESUME_TRAINING=${RESUME_TRAINING:-1}
+SAVE_ONLY_MODEL=${SAVE_ONLY_MODEL:-False}
 
 OUTPUT_DIR=${OUTPUT_DIR:-"/inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/project/Beta-Binomial-PRM/log/normal-${model_name}-visualprm400k"}
 if [ ! -d "$OUTPUT_DIR" ]; then
@@ -25,21 +28,122 @@ fi
 # =========================
 # Resume / fresh-start logic
 # =========================
-# RESUME_TRAINING=1: auto resume from latest checkpoint if exists.
-# RESUME_TRAINING=0: start from scratch and remove old checkpoints.
+# RESUME_TRAINING=1:
+#   - Find the latest checkpoint.
+#   - If it is a complete training checkpoint, resume from it.
+#   - If it does not exist or is incomplete, start from scratch.
+#   - If incomplete, remove all old checkpoints first.
+#
+# RESUME_TRAINING=0:
+#   - Remove all old checkpoints.
+#   - Start from scratch.
+
 RESUME_ARGS=()
 
-if [ "${RESUME_TRAINING}" = "1" ]; then
-  LATEST_CHECKPOINT=$(find "${OUTPUT_DIR}" -maxdepth 1 -type d -name "checkpoint-*" 2>/dev/null | sort -V | tail -n 1)
+# Check whether a checkpoint contains the training states required
+# for true DeepSpeed resume (not just model weights).
+is_complete_checkpoint() {
+  local ckpt="$1"
+  local ds_step_dir=""
 
-  if [ -n "${LATEST_CHECKPOINT}" ]; then
-    echo "Auto resume enabled. Found latest checkpoint: ${LATEST_CHECKPOINT}"
-    RESUME_ARGS+=(--resume_from_checkpoint "${LATEST_CHECKPOINT}")
-  else
-    echo "Auto resume enabled, but no checkpoint found. Start training from scratch."
+  # Hugging Face Trainer state.
+  if [ ! -s "${ckpt}/trainer_state.json" ]; then
+    return 1
   fi
+
+  # DeepSpeed saves its training state under global_step*.
+  ds_step_dir=$(
+    find "${ckpt}" \
+      -maxdepth 1 \
+      -type d \
+      -name "global_step*" \
+      -print -quit \
+      2>/dev/null
+  )
+
+  if [ -z "${ds_step_dir}" ]; then
+    return 1
+  fi
+
+  # DeepSpeed model state.
+  if ! find "${ds_step_dir}" \
+      -maxdepth 1 \
+      -type f \
+      -name "*model_states.pt" \
+      -size +0c \
+      -print -quit \
+      2>/dev/null | grep -q .; then
+    return 1
+  fi
+
+  # DeepSpeed optimizer state.
+  # save_only_model=True checkpoints will fail here.
+  if ! find "${ds_step_dir}" \
+      -maxdepth 1 \
+      -type f \
+      -name "*optim_states.pt" \
+      -size +0c \
+      -print -quit \
+      2>/dev/null | grep -q .; then
+    return 1
+  fi
+
+  return 0
+}
+
+
+if [ "${RESUME_TRAINING}" = "1" ]; then
+
+  LATEST_CHECKPOINT=$(
+    find "${OUTPUT_DIR}" \
+      -maxdepth 1 \
+      -type d \
+      -name "checkpoint-*" \
+      2>/dev/null \
+    | sort -V \
+    | tail -n 1
+  )
+
+  if [ -z "${LATEST_CHECKPOINT}" ]; then
+    echo "============================================================"
+    echo "[INFO] RESUME_TRAINING=1"
+    echo "[INFO] No checkpoint found."
+    echo "[INFO] Start training from scratch."
+    echo "============================================================"
+
+  elif is_complete_checkpoint "${LATEST_CHECKPOINT}"; then
+    echo "============================================================"
+    echo "[INFO] RESUME_TRAINING=1"
+    echo "[INFO] Found complete checkpoint:"
+    echo "       ${LATEST_CHECKPOINT}"
+    echo "[INFO] Resume training from this checkpoint."
+    echo "============================================================"
+
+    RESUME_ARGS+=(
+      --resume_from_checkpoint "${LATEST_CHECKPOINT}"
+    )
+
+  else
+    echo "============================================================"
+    echo "[WARNING] RESUME_TRAINING=1"
+    echo "[WARNING] Latest checkpoint is incomplete:"
+    echo "          ${LATEST_CHECKPOINT}"
+    echo "[WARNING] Cannot perform true resume from this checkpoint."
+    echo "[INFO] Removing all old checkpoints."
+    echo "[INFO] Start training from scratch."
+    echo "============================================================"
+
+    rm -rf "${OUTPUT_DIR}"/checkpoint-*
+  fi
+
 else
-  echo "Resume disabled. Remove old checkpoints and start from scratch."
+
+  echo "============================================================"
+  echo "[INFO] RESUME_TRAINING=0"
+  echo "[INFO] Removing all old checkpoints."
+  echo "[INFO] Start training from scratch."
+  echo "============================================================"
+
   rm -rf "${OUTPUT_DIR}"/checkpoint-*
 fi
 

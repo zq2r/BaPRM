@@ -45,7 +45,7 @@ def main():
                 "question": rec["question"],
                 "query_cot": rec["question"],
                 "image_path": rec["image_path"],
-                "image": rec["image"],
+                "image": rec["image"] if "image" in rec else rec["image_path"],
                 "solutions_splits": [],
                 "prefix_ids": [],
             }
