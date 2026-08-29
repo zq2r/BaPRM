@@ -125,23 +125,6 @@ class BetaBinomStatsCallback(TrainerCallback):
     def on_train_begin(self, args, state, control, model=None, **kwargs):
         if model is not None:
             self._model_ref = model
-        if model is None:
-            return
-        target_model = model.module if hasattr(model, 'module') else model
-        if hasattr(target_model, 'reset_kappa_head'):
-            try:
-                ok = target_model.reset_kappa_head(
-                    float(getattr(target_model, 'beta_binom_kappa_init', 8.0))
-                )
-                if dist.get_rank() == 0:
-                    logger.info(
-                        f'BetaBinomStatsCallback: reset_kappa_head on train begin: success={ok}'
-                    )
-            except Exception as e:
-                if dist.get_rank() == 0:
-                    logger.warning(
-                        f'BetaBinomStatsCallback: reset_kappa_head failed on train begin: {e}'
-                    )
 
     def on_log(self, args, state, control, logs=None, model=None, **kwargs):
         if logs is None:
@@ -1702,6 +1685,27 @@ def main():
                 f'Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change '
                 'the `--output_dir` or add `--overwrite_output_dir` to train from scratch.'
             )
+    # Resolve the effective resume checkpoint once and use it consistently.
+    resume_checkpoint = (
+        training_args.resume_from_checkpoint
+        if training_args.resume_from_checkpoint is not None
+        else last_checkpoint
+    )
+
+    is_resume_training = resume_checkpoint is not None
+
+    if is_resume_training:
+        resume_checkpoint = os.path.abspath(str(resume_checkpoint))
+
+        if not os.path.isdir(resume_checkpoint):
+            raise ValueError(
+                f"Resume checkpoint does not exist: {resume_checkpoint}"
+            )
+
+        if dist.get_rank() == 0:
+            logger.info(
+                f"Strict resume training from: {resume_checkpoint}"
+            )
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
@@ -1750,7 +1754,12 @@ def main():
 
     if model_args.model_name_or_path is not None:
         logger.info('Loading InternVLChatModel...')
-        config = InternVLChatConfig.from_pretrained(model_args.model_name_or_path)
+        config_load_path = (
+            resume_checkpoint
+            if is_resume_training
+            else model_args.model_name_or_path
+        )
+        config = InternVLChatConfig.from_pretrained(config_load_path)
         config.vision_config.drop_path_rate = model_args.drop_path_rate
         if config.llm_config.model_type == 'internlm2':
             config.llm_config.attn_implementation = 'flash_attention_2'  # for InternLM
@@ -1834,7 +1843,7 @@ def main():
     #   (or BayesianPRM) checkpoint. The loaded checkpoint config is
     #   the single source of truth for the frozen ensemble.
     # -------------------------------------------------------------
-    if model_args.prm_loss_type == 'ensemble_prm':
+    if model_args.prm_loss_type == 'ensemble_prm' and not is_resume_training:
         model.config.ensemble_prm_num_heads = (
             model_args.ensemble_prm_num_heads
         )
@@ -1873,6 +1882,43 @@ def main():
             model_args.ensemble_prm_bootstrap_prob
         )
 
+    elif (
+        model_args.prm_loss_type == 'ensemble_prm'
+        and is_resume_training
+    ):
+        required_ensemble_config = (
+            'ensemble_prm_num_heads',
+            'ensemble_prm_hidden_dim',
+            'ensemble_prm_dropout',
+            'ensemble_prm_use_prior_network',
+            'ensemble_prm_prior_scale',
+            'ensemble_prm_bootstrap_prob',
+        )
+
+        missing = [
+            key
+            for key in required_ensemble_config
+            if not hasattr(model.config, key)
+        ]
+
+        if missing:
+            raise RuntimeError(
+                "Cannot resume EnsemblePRM because checkpoint config "
+                f"is missing fields: {missing}. "
+                f"checkpoint={resume_checkpoint}"
+            )
+
+        if dist.get_rank() == 0:
+            logger.info(
+                "Resume EnsemblePRM: using architecture from checkpoint config: "
+                f"num_heads={model.config.ensemble_prm_num_heads}, "
+                f"hidden_dim={model.config.ensemble_prm_hidden_dim}, "
+                f"dropout={model.config.ensemble_prm_dropout}, "
+                f"use_prior_network={model.config.ensemble_prm_use_prior_network}, "
+                f"prior_scale={model.config.ensemble_prm_prior_scale}, "
+                f"bootstrap_prob={model.config.ensemble_prm_bootstrap_prob}"
+            )
+
     elif model_args.prm_loss_type == 'bayesian_prm':
         required_ensemble_config = (
             'ensemble_prm_num_heads',
@@ -1907,35 +1953,81 @@ def main():
                 f"{model.config.ensemble_prm_use_prior_network}, "
                 f"prior_scale={model.config.ensemble_prm_prior_scale}"
             )
-
     # BayesianPRM belief-network hyperparameters.
-    model.config.belief_hidden_dim = model_args.belief_hidden_dim
-    model.config.belief_dropout = model_args.belief_dropout
-    model.config.belief_beta_kl = model_args.belief_beta_kl
-    model.config.belief_use_reward_probs = model_args.belief_use_reward_probs
-    model.config.belief_loglik_normalize_by_n = (
-        model_args.belief_loglik_normalize_by_n
-    )
-    model.config.belief_use_conservatism = (
-        model_args.belief_use_conservatism
-    )
-    model.config.belief_conservatism_beta = (
-        model_args.belief_conservatism_beta
-    )
+    if model_args.prm_loss_type == 'bayesian_prm':
+        if not is_resume_training:
+            # Fresh BayesianPRM training:
+            # the EnsemblePRM checkpoint has no trained belief head yet,
+            # so CLI defines the new belief architecture/hyperparameters.
+            model.config.belief_hidden_dim = model_args.belief_hidden_dim
+            model.config.belief_dropout = model_args.belief_dropout
+            model.config.belief_beta_kl = model_args.belief_beta_kl
+            model.config.belief_use_reward_probs = (
+                model_args.belief_use_reward_probs
+            )
+            model.config.belief_loglik_normalize_by_n = (
+                model_args.belief_loglik_normalize_by_n
+            )
+            model.config.belief_use_conservatism = (
+                model_args.belief_use_conservatism
+            )
+            model.config.belief_conservatism_beta = (
+                model_args.belief_conservatism_beta
+            )
 
-    model.belief_hidden_dim = int(model_args.belief_hidden_dim)
-    model.belief_dropout = float(model_args.belief_dropout)
-    model.belief_beta_kl = float(model_args.belief_beta_kl)
-    model.belief_use_reward_probs = bool(model_args.belief_use_reward_probs)
-    model.belief_loglik_normalize_by_n = bool(
-        model_args.belief_loglik_normalize_by_n
-    )
-    model.belief_use_conservatism = bool(
-        model_args.belief_use_conservatism
-    )
-    model.belief_conservatism_beta = float(
-        model_args.belief_conservatism_beta
-    )
+            model.belief_hidden_dim = int(
+                model_args.belief_hidden_dim
+            )
+            model.belief_dropout = float(
+                model_args.belief_dropout
+            )
+            model.belief_beta_kl = float(
+                model_args.belief_beta_kl
+            )
+            model.belief_use_reward_probs = bool(
+                model_args.belief_use_reward_probs
+            )
+            model.belief_loglik_normalize_by_n = bool(
+                model_args.belief_loglik_normalize_by_n
+            )
+            model.belief_use_conservatism = bool(
+                model_args.belief_use_conservatism
+            )
+            model.belief_conservatism_beta = float(
+                model_args.belief_conservatism_beta
+            )
+
+        else:
+            # Resume BayesianPRM:
+            # checkpoint config is the source of truth.
+            required_belief_config = (
+                'belief_hidden_dim',
+                'belief_dropout',
+                'belief_beta_kl',
+                'belief_use_reward_probs',
+                'belief_loglik_normalize_by_n',
+                'belief_use_conservatism',
+                'belief_conservatism_beta',
+            )
+
+            missing = [
+                key
+                for key in required_belief_config
+                if not hasattr(model.config, key)
+            ]
+
+            if missing:
+                raise RuntimeError(
+                    "Cannot resume BayesianPRM because checkpoint config "
+                    f"is missing fields: {missing}. "
+                    f"checkpoint={resume_checkpoint}"
+                )
+
+            if dist.get_rank() == 0:
+                logger.info(
+                    "Resume BayesianPRM: using belief configuration "
+                    "from checkpoint config."
+                )
     
 
     if model_args.prm_loss_type in ('ensemble_prm', 'bayesian_prm'):
@@ -2073,11 +2165,27 @@ def main():
     model.beta_binom_evi_reg = data_args.beta_binom_evi_reg
     model.beta_binom_kappa_init = data_args.beta_binom_kappa_init
     if model_args.prm_loss_type == 'beta_binom':
-        if hasattr(model, 'reset_kappa_head'):
-            model.reset_kappa_head(model.beta_binom_kappa_init)
+        if not is_resume_training:
+            if hasattr(model, 'reset_kappa_head'):
+                ok = model.reset_kappa_head(
+                    model.beta_binom_kappa_init
+                )
+
+                if dist.get_rank() == 0:
+                    logger.info(
+                        "Fresh BetaPRM training: "
+                        f"reset_kappa_head success={ok}"
+                    )
+        else:
+            if dist.get_rank() == 0:
+                logger.info(
+                    "Resume BetaPRM training: "
+                    "preserve checkpoint kappa_head; skip reset."
+                )
 
         attach_kappa_head_grad_multiplier(
-            model, data_args.beta_binom_kappa_head_lr_mult
+            model,
+            data_args.beta_binom_kappa_head_lr_mult,
         )
         if dist.get_rank() == 0:
             logger.info(
@@ -2323,12 +2431,7 @@ def main():
 
     # Training
     if training_args.do_train:
-        checkpoint = None
-        if training_args.resume_from_checkpoint is not None:
-            checkpoint = training_args.resume_from_checkpoint
-        elif last_checkpoint is not None:
-            checkpoint = last_checkpoint
-        train_result = trainer.train(resume_from_checkpoint=checkpoint)
+        train_result = trainer.train(resume_from_checkpoint=resume_checkpoint)
 
         metrics = train_result.metrics
         try:
