@@ -21,9 +21,9 @@ export HF_DATASETS_OFFLINE=${HF_DATASETS_OFFLINE:-1}
 # =========================
 # Common configs
 # =========================
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3"}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"4,5,6,7"}
 GPUS=${GPUS:-4}
-model_name=${model_name:-"InternVL3-2B"}
+model_name=${model_name:-"InternVL3-8B"}
 export MASTER_PORT=${MASTER_PORT:-4320}
 
 ENSEMBLE_PRM_BOOTSTRAP_PROB=${ENSEMBLE_PRM_BOOTSTRAP_PROB:-0.5}
