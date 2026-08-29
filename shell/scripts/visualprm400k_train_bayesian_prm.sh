@@ -11,14 +11,15 @@ cd "${REPO_ROOT}"
 #
 # This script ONLY trains the Bayesian belief network.
 #
-# Required input:
-#   A pretrained EnsemblePRM checkpoint.
+# The target EnsemblePRM checkpoint is selected by:
+#   - ENSEMBLE_PRM_USE_PRIOR_NETWORK
+#   - ENSEMBLE_PRM_NUM_HEADS
+#   - ENSEMBLE_PRM_PRIOR_SCALE
 #
-# The frozen ensemble architecture (num_heads, hidden_dim,
-# dropout, prior-network settings, etc.) is loaded directly
-# from the checkpoint config and must NOT be re-specified here.
+# These selector variables are used ONLY to locate and verify the
+# EnsemblePRM checkpoint. The actual frozen ensemble architecture
+# is restored from checkpoint/config.json.
 # ============================================================
-
 
 # ============================================================
 # Offline
@@ -26,7 +27,6 @@ cd "${REPO_ROOT}"
 export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
 export TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
 export HF_DATASETS_OFFLINE=${HF_DATASETS_OFFLINE:-1}
-
 
 # ============================================================
 # Distributed / device
@@ -42,90 +42,17 @@ export MASTER_PORT=${MASTER_PORT:-4320}
 
 model_name=${model_name:-"InternVL3-8B"}
 
-
 # ============================================================
-# Paths
-# ============================================================
-
-# REQUIRED.
-# Explicitly specify the exact EnsemblePRM checkpoint.
-ENSEMBLE_CHECKPOINT=${ENSEMBLE_CHECKPOINT:-""}
-
-if [ -z "${ENSEMBLE_CHECKPOINT}" ]; then
-    echo "ERROR: ENSEMBLE_CHECKPOINT must be explicitly specified."
-    echo
-    echo "Example:"
-    echo "  ENSEMBLE_CHECKPOINT=/path/to/checkpoint-xxx \\"
-    echo "  bash shell/scripts/visualprm400k_train_bayesian_prm.sh"
-    exit 1
-fi
-
-if [ ! -d "${ENSEMBLE_CHECKPOINT}" ]; then
-    echo "ERROR: Ensemble checkpoint does not exist:"
-    echo "  ${ENSEMBLE_CHECKPOINT}"
-    exit 1
-fi
-
-if [ ! -f "${ENSEMBLE_CHECKPOINT}/config.json" ]; then
-    echo "ERROR: config.json not found in ensemble checkpoint:"
-    echo "  ${ENSEMBLE_CHECKPOINT}"
-    exit 1
-fi
-
-
-BAYESIAN_OUTPUT_DIR=${BAYESIAN_OUTPUT_DIR:-"${REPO_ROOT}/log/bayesian-${model_name}-visualprm400k"}
-
-META_PATH=${META_PATH:-"${REPO_ROOT}/shell/data/meta_visualprm400k_beta_binom.json"}
-
-DEEPSPEED_CONFIG=${DEEPSPEED_CONFIG:-"${REPO_ROOT}/configs/zero_stage3_config.json"}
-
-mkdir -p "${BAYESIAN_OUTPUT_DIR}"
-
-
-# ============================================================
-# Inspect EnsemblePRM checkpoint
+# Ensemble checkpoint selector
 #
-# Ensemble architecture comes ONLY from config.json.
+# IMPORTANT:
+# These values do NOT redefine the loaded EnsemblePRM.
+# They only select the experiment directory whose latest
+# checkpoint will be loaded.
 # ============================================================
-python - "${ENSEMBLE_CHECKPOINT}" <<'PY'
-import json
-import os
-import sys
-
-ckpt = sys.argv[1]
-config_path = os.path.join(ckpt, "config.json")
-
-with open(config_path, "r", encoding="utf-8") as f:
-    cfg = json.load(f)
-
-required = [
-    "ensemble_prm_num_heads",
-    "ensemble_prm_hidden_dim",
-    "ensemble_prm_dropout",
-    "ensemble_prm_use_prior_network",
-    "ensemble_prm_prior_scale",
-]
-
-missing = [k for k in required if k not in cfg]
-
-if missing:
-    raise RuntimeError(
-        "The supplied checkpoint is missing required EnsemblePRM "
-        f"configuration fields: {missing}"
-    )
-
-print("========== Loaded EnsemblePRM config ==========")
-for key in required:
-    print(f"{key}: {cfg[key]}")
-
-print(
-    "ensemble_prm_bootstrap_prob:",
-    cfg.get("ensemble_prm_bootstrap_prob", "<not stored>")
-)
-print("checkpoint prm_loss_type:", cfg.get("prm_loss_type"))
-print("================================================")
-PY
-
+ENSEMBLE_PRM_USE_PRIOR_NETWORK=${ENSEMBLE_PRM_USE_PRIOR_NETWORK:-True}
+ENSEMBLE_PRM_NUM_HEADS=${ENSEMBLE_PRM_NUM_HEADS:-10}
+ENSEMBLE_PRM_PRIOR_SCALE=${ENSEMBLE_PRM_PRIOR_SCALE:-10}
 
 # ============================================================
 # Bayesian belief network
@@ -152,7 +79,6 @@ BELIEF_BETA_KL=${BELIEF_BETA_KL:-0.05}
 #   divide the likelihood by N.
 BELIEF_LOGLIK_NORMALIZE_BY_N=${BELIEF_LOGLIK_NORMALIZE_BY_N:-False}
 
-
 # ============================================================
 # Conservatism-aware belief calibration
 #
@@ -166,6 +92,177 @@ BELIEF_LOGLIK_NORMALIZE_BY_N=${BELIEF_LOGLIK_NORMALIZE_BY_N:-False}
 BELIEF_USE_CONSERVATISM=${BELIEF_USE_CONSERVATISM:-True}
 BELIEF_CONSERVATISM_BETA=${BELIEF_CONSERVATISM_BETA:-0.1}
 
+# Use exactly the same directory naming convention as
+# visualprm400k_train_ensemble_prm.sh.
+if [ "${ENSEMBLE_PRM_USE_PRIOR_NETWORK}" = "True" ] || \
+   [ "${ENSEMBLE_PRM_USE_PRIOR_NETWORK}" = "true" ]; then
+    DEFAULT_ENSEMBLE_OUTPUT_DIR="${REPO_ROOT}/log/ensemble-prior-head${ENSEMBLE_PRM_NUM_HEADS}-scale${ENSEMBLE_PRM_PRIOR_SCALE}-${model_name}-visualprm400k"
+    DEFAULT_BAYESIAN_OUTPUT_DIR="${REPO_ROOT}/log/bayesian-prior-head${ENSEMBLE_PRM_NUM_HEADS}-scale${ENSEMBLE_PRM_PRIOR_SCALE}-beta${BELIEF_CONSERVATISM_BETA}-${model_name}-visualprm400k"
+else
+    DEFAULT_ENSEMBLE_OUTPUT_DIR="${REPO_ROOT}/log/ensemble-head${ENSEMBLE_PRM_NUM_HEADS}-scale${ENSEMBLE_PRM_PRIOR_SCALE}-${model_name}-visualprm400k"
+    DEFAULT_BAYESIAN_OUTPUT_DIR="${REPO_ROOT}/log/bayesian-head${ENSEMBLE_PRM_NUM_HEADS}-scale${ENSEMBLE_PRM_PRIOR_SCALE}-beta${BELIEF_CONSERVATISM_BETA}-${model_name}-visualprm400k"
+fi
+
+ENSEMBLE_OUTPUT_DIR=${ENSEMBLE_OUTPUT_DIR:-"${DEFAULT_ENSEMBLE_OUTPUT_DIR}"}
+BAYESIAN_OUTPUT_DIR=${BAYESIAN_OUTPUT_DIR:-"${DEFAULT_BAYESIAN_OUTPUT_DIR}"}
+
+# Optional escape hatch:
+# if ENSEMBLE_CHECKPOINT is explicitly supplied, use it;
+# otherwise automatically select the latest checkpoint under
+# ENSEMBLE_OUTPUT_DIR.
+ENSEMBLE_CHECKPOINT=${ENSEMBLE_CHECKPOINT:-""}
+
+META_PATH=${META_PATH:-"${REPO_ROOT}/shell/data/meta_visualprm400k_beta_binom.json"}
+DEEPSPEED_CONFIG=${DEEPSPEED_CONFIG:-"${REPO_ROOT}/configs/zero_stage3_config.json"}
+
+mkdir -p "${BAYESIAN_OUTPUT_DIR}"
+
+# ============================================================
+# Resolve latest EnsemblePRM checkpoint
+# ============================================================
+if [ -z "${ENSEMBLE_CHECKPOINT}" ]; then
+    echo "Searching EnsemblePRM checkpoint..."
+    echo "  use_prior_network: ${ENSEMBLE_PRM_USE_PRIOR_NETWORK}"
+    echo "  num_heads:         ${ENSEMBLE_PRM_NUM_HEADS}"
+    echo "  prior_scale:       ${ENSEMBLE_PRM_PRIOR_SCALE}"
+    echo "  directory:         ${ENSEMBLE_OUTPUT_DIR}"
+
+    if [ ! -d "${ENSEMBLE_OUTPUT_DIR}" ]; then
+        echo "ERROR: EnsemblePRM experiment directory does not exist:"
+        echo "  ${ENSEMBLE_OUTPUT_DIR}"
+        exit 1
+    fi
+
+    ENSEMBLE_CHECKPOINT="$(
+        find "${ENSEMBLE_OUTPUT_DIR}" \
+            -maxdepth 1 \
+            -type d \
+            -name "checkpoint-*" \
+            2>/dev/null \
+        | sort -V \
+        | tail -n 1
+    )"
+
+    if [ -z "${ENSEMBLE_CHECKPOINT}" ]; then
+        echo "ERROR: No EnsemblePRM checkpoint found under:"
+        echo "  ${ENSEMBLE_OUTPUT_DIR}"
+        exit 1
+    fi
+else
+    echo "Using explicitly specified ENSEMBLE_CHECKPOINT:"
+    echo "  ${ENSEMBLE_CHECKPOINT}"
+fi
+
+if [ ! -d "${ENSEMBLE_CHECKPOINT}" ]; then
+    echo "ERROR: EnsemblePRM checkpoint does not exist:"
+    echo "  ${ENSEMBLE_CHECKPOINT}"
+    exit 1
+fi
+
+if [ ! -f "${ENSEMBLE_CHECKPOINT}/config.json" ]; then
+    echo "ERROR: config.json not found in EnsemblePRM checkpoint:"
+    echo "  ${ENSEMBLE_CHECKPOINT}"
+    exit 1
+fi
+
+echo "Resolved EnsemblePRM checkpoint:"
+echo "  ${ENSEMBLE_CHECKPOINT}"
+
+# ============================================================
+# Inspect + verify EnsemblePRM checkpoint
+#
+# The selector is checked against config.json here.
+# The training code itself still uses checkpoint config as the
+# single source of truth for the frozen ensemble architecture.
+# ============================================================
+python - \
+    "${ENSEMBLE_CHECKPOINT}" \
+    "${ENSEMBLE_PRM_USE_PRIOR_NETWORK}" \
+    "${ENSEMBLE_PRM_NUM_HEADS}" \
+    "${ENSEMBLE_PRM_PRIOR_SCALE}" <<'PY'
+import json
+import math
+import os
+import sys
+
+ckpt = sys.argv[1]
+selector_prior_raw = sys.argv[2]
+selector_num_heads = int(sys.argv[3])
+selector_prior_scale = float(sys.argv[4])
+
+selector_use_prior = selector_prior_raw.lower() in {
+    "true",
+    "1",
+    "yes",
+    "y",
+}
+
+config_path = os.path.join(ckpt, "config.json")
+with open(config_path, "r", encoding="utf-8") as f:
+    cfg = json.load(f)
+
+required = [
+    "ensemble_prm_num_heads",
+    "ensemble_prm_hidden_dim",
+    "ensemble_prm_dropout",
+    "ensemble_prm_use_prior_network",
+    "ensemble_prm_prior_scale",
+]
+
+missing = [k for k in required if k not in cfg]
+if missing:
+    raise RuntimeError(
+        "The resolved checkpoint is missing required EnsemblePRM "
+        f"configuration fields: {missing}"
+    )
+
+actual_num_heads = int(cfg["ensemble_prm_num_heads"])
+actual_use_prior = bool(cfg["ensemble_prm_use_prior_network"])
+actual_prior_scale = float(cfg["ensemble_prm_prior_scale"])
+
+errors = []
+
+if actual_num_heads != selector_num_heads:
+    errors.append(
+        f"num_heads mismatch: selector={selector_num_heads}, "
+        f"checkpoint={actual_num_heads}"
+    )
+
+if actual_use_prior != selector_use_prior:
+    errors.append(
+        f"use_prior_network mismatch: selector={selector_use_prior}, "
+        f"checkpoint={actual_use_prior}"
+    )
+
+if not math.isclose(
+    actual_prior_scale,
+    selector_prior_scale,
+    rel_tol=1e-9,
+    abs_tol=1e-12,
+):
+    errors.append(
+        f"prior_scale mismatch: selector={selector_prior_scale}, "
+        f"checkpoint={actual_prior_scale}"
+    )
+
+if errors:
+    raise RuntimeError(
+        "Resolved EnsemblePRM checkpoint does not match the requested "
+        "selector:\n  - " + "\n  - ".join(errors)
+    )
+
+print("========== Loaded EnsemblePRM config ==========")
+print("checkpoint:", ckpt)
+for key in required:
+    print(f"{key}: {cfg[key]}")
+print(
+    "ensemble_prm_bootstrap_prob:",
+    cfg.get("ensemble_prm_bootstrap_prob", "<not stored>"),
+)
+print("checkpoint prm_loss_type:", cfg.get("prm_loss_type", "<missing>"))
+print("Selector/config verification: PASSED")
+print("================================================")
+PY
 
 # ============================================================
 # PRM data split
@@ -183,7 +280,6 @@ PRM_DATA_SPLIT_ENABLE=${PRM_DATA_SPLIT_ENABLE:-True}
 PRM_DATA_SPLIT_RATIO=${PRM_DATA_SPLIT_RATIO:-0.8}
 PRM_DATA_SPLIT_SEED=${PRM_DATA_SPLIT_SEED:-42}
 
-
 # ============================================================
 # Optimization
 # ============================================================
@@ -191,7 +287,6 @@ BATCH_SIZE=${BATCH_SIZE:-512}
 PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-2}
 
 DENOM=$((PER_DEVICE_BATCH_SIZE * GPUS))
-
 if (( BATCH_SIZE % DENOM != 0 )); then
     echo "ERROR: BATCH_SIZE must be divisible by"
     echo "       PER_DEVICE_BATCH_SIZE * GPUS."
@@ -216,7 +311,6 @@ SAVE_TOTAL_LIMIT=${SAVE_TOTAL_LIMIT:-1}
 # is not available for a strict training resume.
 SAVE_ONLY_MODEL=${SAVE_ONLY_MODEL:-True}
 
-
 # ============================================================
 # Optional short smoke test
 # ============================================================
@@ -227,7 +321,6 @@ if [ -n "${MAX_STEPS}" ]; then
     MAX_STEPS_ARGS+=(--max_steps "${MAX_STEPS}")
 fi
 
-
 # ============================================================
 # Resume Bayesian belief training
 # ============================================================
@@ -237,7 +330,6 @@ BAYESIAN_MODEL_PATH="${ENSEMBLE_CHECKPOINT}"
 BAYESIAN_RESUME_ARGS=()
 
 if [ "${RESUME_BELIEF_TRAINING}" = "1" ]; then
-
     LATEST_BAYESIAN_CHECKPOINT="$(
         find "${BAYESIAN_OUTPUT_DIR}" \
             -maxdepth 1 \
@@ -254,23 +346,19 @@ if [ "${RESUME_BELIEF_TRAINING}" = "1" ]; then
     fi
 
     BAYESIAN_MODEL_PATH="${LATEST_BAYESIAN_CHECKPOINT}"
-
     BAYESIAN_RESUME_ARGS+=(
         --resume_from_checkpoint "${LATEST_BAYESIAN_CHECKPOINT}"
     )
 
     echo "Resume BayesianPRM from:"
     echo "  ${LATEST_BAYESIAN_CHECKPOINT}"
-
 else
-
     echo "Fresh BayesianPRM belief training."
     echo "Removing old Bayesian checkpoints under:"
     echo "  ${BAYESIAN_OUTPUT_DIR}"
 
     rm -rf "${BAYESIAN_OUTPUT_DIR}"/checkpoint-*
 fi
-
 
 # ============================================================
 # Runtime
@@ -303,24 +391,39 @@ fi
 export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-/inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/cache/torch_extensions}
 mkdir -p "${TORCH_EXTENSIONS_DIR}"
 
-
 # ============================================================
 # WandB
 # ============================================================
 export WANDB_MODE=${WANDB_MODE:-offline}
 export WANDB_PROJECT=${WANDB_PROJECT:-"Beta-PRM"}
-export WANDB_NAME=${WANDB_NAME:-"bayesian-${model_name}-visualprm400k"}
-export WANDB_RUN_GROUP=${WANDB_RUN_GROUP:-"bayesian-${model_name}"}
-export WANDB_TAGS=${WANDB_TAGS:-"visualprm400k,bayesian"}
+
+if [ "${ENSEMBLE_PRM_USE_PRIOR_NETWORK}" = "True" ] || \
+   [ "${ENSEMBLE_PRM_USE_PRIOR_NETWORK}" = "true" ]; then
+    DEFAULT_WANDB_NAME="bayesian-prior-head${ENSEMBLE_PRM_NUM_HEADS}-scale${ENSEMBLE_PRM_PRIOR_SCALE}-${model_name}-visualprm400k"
+    DEFAULT_WANDB_RUN_GROUP="bayesian-prior-head${ENSEMBLE_PRM_NUM_HEADS}-scale${ENSEMBLE_PRM_PRIOR_SCALE}-${model_name}"
+    DEFAULT_WANDB_TAGS="visualprm400k,bayesian,ensemble_prior,head${ENSEMBLE_PRM_NUM_HEADS},scale${ENSEMBLE_PRM_PRIOR_SCALE}"
+else
+    DEFAULT_WANDB_NAME="bayesian-head${ENSEMBLE_PRM_NUM_HEADS}-scale${ENSEMBLE_PRM_PRIOR_SCALE}-${model_name}-visualprm400k"
+    DEFAULT_WANDB_RUN_GROUP="bayesian-head${ENSEMBLE_PRM_NUM_HEADS}-scale${ENSEMBLE_PRM_PRIOR_SCALE}-${model_name}"
+    DEFAULT_WANDB_TAGS="visualprm400k,bayesian,head${ENSEMBLE_PRM_NUM_HEADS},scale${ENSEMBLE_PRM_PRIOR_SCALE}"
+fi
+
+export WANDB_NAME=${WANDB_NAME:-"${DEFAULT_WANDB_NAME}"}
+export WANDB_RUN_GROUP=${WANDB_RUN_GROUP:-"${DEFAULT_WANDB_RUN_GROUP}"}
+export WANDB_TAGS=${WANDB_TAGS:-"${DEFAULT_WANDB_TAGS}"}
 export WANDB_DIR=${WANDB_DIR:-"${BAYESIAN_OUTPUT_DIR}/wandb"}
 
 mkdir -p "${WANDB_DIR}"
-
 
 # ============================================================
 # Summary
 # ============================================================
 echo "================ BayesianPRM training ================"
+echo "Ensemble selector:"
+echo "  ENSEMBLE_PRM_USE_PRIOR_NETWORK: ${ENSEMBLE_PRM_USE_PRIOR_NETWORK}"
+echo "  ENSEMBLE_PRM_NUM_HEADS: ${ENSEMBLE_PRM_NUM_HEADS}"
+echo "  ENSEMBLE_PRM_PRIOR_SCALE: ${ENSEMBLE_PRM_PRIOR_SCALE}"
+echo "ENSEMBLE_OUTPUT_DIR: ${ENSEMBLE_OUTPUT_DIR}"
 echo "ENSEMBLE_CHECKPOINT: ${ENSEMBLE_CHECKPOINT}"
 echo "BAYESIAN_MODEL_PATH: ${BAYESIAN_MODEL_PATH}"
 echo "BAYESIAN_OUTPUT_DIR: ${BAYESIAN_OUTPUT_DIR}"
@@ -345,8 +448,8 @@ echo "PER_DEVICE_BATCH_SIZE: ${PER_DEVICE_BATCH_SIZE}"
 echo "GRADIENT_ACC: ${GRADIENT_ACC}"
 echo "LEARNING_RATE: ${LEARNING_RATE}"
 echo "NUM_TRAIN_EPOCHS: ${NUM_TRAIN_EPOCHS}"
+echo "WANDB_NAME: ${WANDB_NAME}"
 echo "========================================================"
-
 
 # ============================================================
 # Train Bayesian belief network
