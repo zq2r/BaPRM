@@ -41,13 +41,6 @@ def batch_prm_weighted_mu(
 ):
     """
     Basic BayesianPRM evaluator.
-
-    For each <prm> marker:
-        mu_heads = sigmoid(ensemble_prm_head(h_prm))      # [P, E]
-        weights  = softmax(belief_head(h_prm, mu_heads)) # [P, E]
-        mu_bayes = sum_m weights_m * mu_heads_m          # [P]
-
-    This version does not compute uncertainty.
     """
     prm_token_id = tokenizer.convert_tokens_to_ids("<prm>")
     img_context_token_id = tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
@@ -153,48 +146,35 @@ def batch_prm_weighted_mu(
         default_use_conservatism,
     )
 
-    if belief_hybrid_lambda is None:
-        hybrid_lambda = float(
-            getattr(model, "belief_hybrid_lambda", 1.0)
-        )
-    else:
-        hybrid_lambda = float(belief_hybrid_lambda)
-
     if belief_conservatism_beta is None:
         conservatism_beta = float(
             getattr(model, "belief_conservatism_beta", 0.1)
         )
     else:
-        conservatism_beta = float(belief_conservatism_beta)
+        conservatism_beta = float(
+            belief_conservatism_beta
+        )
 
-    if use_conservatism and hybrid_lambda < 1.0:
+    if use_conservatism:
         temperature = max(
             conservatism_beta,
             1e-6,
         )
 
-        # Conservative posterior:
-        # alpha_con = softmax(-reward / beta_2).
+        # Conservatism-aware belief calibration:
         #
-        # Here reward is represented by each ensemble head's predicted
-        # correctness probability mu_m(c_t).
-        con_weights = torch.softmax(
-            -mu_heads / temperature,
-            dim=-1,
+        # alpha_post_m
+        #   ∝ alpha_rel_m * exp(-mu_m / beta_2)
+        #
+        # Implemented in log space for numerical stability.
+        log_rel_weights = torch.log(
+            rel_weights.clamp_min(1e-6)
         )
 
-        # Hybrid posterior:
-        # alpha_post = lambda * alpha_rel + (1-lambda) * alpha_con.
-        post_weights = (
-            hybrid_lambda * rel_weights
-            + (1.0 - hybrid_lambda) * con_weights
-        )
-
-        # Numerical safety.
-        post_weights = post_weights / post_weights.sum(
+        post_weights = torch.softmax(
+            log_rel_weights - mu_heads / temperature,
             dim=-1,
-            keepdim=True,
-        ).clamp_min(1e-6)
+        )
     else:
         post_weights = rel_weights
 
