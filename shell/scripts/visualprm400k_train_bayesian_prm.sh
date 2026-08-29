@@ -6,381 +6,422 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
-is_true() {
-  local value="${1:-False}"
-  [ "${value}" = "True" ] || [ "${value}" = "true" ] || [ "${value}" = "1" ]
-}
+# ============================================================
+# BayesianPRM Stage-2 Training
+#
+# This script ONLY trains the Bayesian belief network.
+#
+# Required input:
+#   A pretrained EnsemblePRM checkpoint.
+#
+# The frozen ensemble architecture (num_heads, hidden_dim,
+# dropout, prior-network settings, etc.) is loaded directly
+# from the checkpoint config and must NOT be re-specified here.
+# ============================================================
 
-# =========================
-# Offline setting
-# =========================
+
+# ============================================================
+# Offline
+# ============================================================
 export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
 export TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
 export HF_DATASETS_OFFLINE=${HF_DATASETS_OFFLINE:-1}
 
-# =========================
-# Common configs
-# =========================
+
+# ============================================================
+# Distributed / device
+# ============================================================
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"4,5,6,7"}
+
 GPUS=${GPUS:-4}
-model_name=${model_name:-"InternVL3-8B"}
+NNODES=${NNODES:-1}
+NODE_RANK=${NODE_RANK:-0}
+MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
+NPROC_PER_NODE=${NPROC_PER_NODE:-${GPUS}}
 export MASTER_PORT=${MASTER_PORT:-4320}
 
-ENSEMBLE_PRM_BOOTSTRAP_PROB=${ENSEMBLE_PRM_BOOTSTRAP_PROB:-0.5}
-BELIEF_BETA_KL=${BELIEF_BETA_KL:-0.05}
+model_name=${model_name:-"InternVL3-8B"}
 
-# Prior-network switch must be defined before default paths,
-# because output directory names depend on it.
-ENSEMBLE_PRM_USE_PRIOR_NETWORK=${ENSEMBLE_PRM_USE_PRIOR_NETWORK:-True}
-ENSEMBLE_PRM_PRIOR_SCALE=${ENSEMBLE_PRM_PRIOR_SCALE:-1.0}
 
-# Whether to skip ensemble training.
-# 0: train ensemble first, then train belief network.
-# 1: directly load ensemble checkpoint and train belief network.
-LOAD_ENSEMBLE_CHECKPOINT=${LOAD_ENSEMBLE_CHECKPOINT:-1}
-
-# Stage resume switches.
-RESUME_ENSEMBLE_TRAINING=${RESUME_ENSEMBLE_TRAINING:-0}
-RESUME_BELIEF_TRAINING=${RESUME_BELIEF_TRAINING:-0}
-
-SAVE_ONLY_MODEL=${SAVE_ONLY_MODEL:-True}
-
-# =========================
+# ============================================================
 # Paths
-# =========================
-if is_true "${ENSEMBLE_PRM_USE_PRIOR_NETWORK}"; then
-  DEFAULT_ENSEMBLE_OUTPUT_DIR="${REPO_ROOT}/log/ensemble-prior-${model_name}-visualprm400k"
-  DEFAULT_BAYESIAN_OUTPUT_DIR="${REPO_ROOT}/log/bayesian-prior-${model_name}-visualprm400k"
-else
-  DEFAULT_ENSEMBLE_OUTPUT_DIR="${REPO_ROOT}/log/ensemble-${model_name}-visualprm400k"
-  DEFAULT_BAYESIAN_OUTPUT_DIR="${REPO_ROOT}/log/bayesian-${model_name}-visualprm400k"
-fi
+# ============================================================
 
-ENSEMBLE_OUTPUT_DIR=${ENSEMBLE_OUTPUT_DIR:-"${DEFAULT_ENSEMBLE_OUTPUT_DIR}"}
-BAYESIAN_OUTPUT_DIR=${BAYESIAN_OUTPUT_DIR:-"${DEFAULT_BAYESIAN_OUTPUT_DIR}"}
-
-# Optional explicit ensemble checkpoint.
-# If empty, the script will search latest checkpoint under ENSEMBLE_OUTPUT_DIR.
+# REQUIRED.
+# Explicitly specify the exact EnsemblePRM checkpoint.
 ENSEMBLE_CHECKPOINT=${ENSEMBLE_CHECKPOINT:-""}
 
+if [ -z "${ENSEMBLE_CHECKPOINT}" ]; then
+    echo "ERROR: ENSEMBLE_CHECKPOINT must be explicitly specified."
+    echo
+    echo "Example:"
+    echo "  ENSEMBLE_CHECKPOINT=/path/to/checkpoint-xxx \\"
+    echo "  bash shell/scripts/visualprm400k_train_bayesian_prm.sh"
+    exit 1
+fi
+
+if [ ! -d "${ENSEMBLE_CHECKPOINT}" ]; then
+    echo "ERROR: Ensemble checkpoint does not exist:"
+    echo "  ${ENSEMBLE_CHECKPOINT}"
+    exit 1
+fi
+
+if [ ! -f "${ENSEMBLE_CHECKPOINT}/config.json" ]; then
+    echo "ERROR: config.json not found in ensemble checkpoint:"
+    echo "  ${ENSEMBLE_CHECKPOINT}"
+    exit 1
+fi
+
+
+BAYESIAN_OUTPUT_DIR=${BAYESIAN_OUTPUT_DIR:-"${REPO_ROOT}/log/bayesian-${model_name}-visualprm400k"}
+
 META_PATH=${META_PATH:-"${REPO_ROOT}/shell/data/meta_visualprm400k_beta_binom.json"}
-MODEL_PATH=${MODEL_PATH:-"/inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/model/${model_name}"}
+
 DEEPSPEED_CONFIG=${DEEPSPEED_CONFIG:-"${REPO_ROOT}/configs/zero_stage3_config.json"}
 
-# =========================
-# Optional PRM data split
-# =========================
+mkdir -p "${BAYESIAN_OUTPUT_DIR}"
+
+
+# ============================================================
+# Inspect EnsemblePRM checkpoint
+#
+# Ensemble architecture comes ONLY from config.json.
+# ============================================================
+python - "${ENSEMBLE_CHECKPOINT}" <<'PY'
+import json
+import os
+import sys
+
+ckpt = sys.argv[1]
+config_path = os.path.join(ckpt, "config.json")
+
+with open(config_path, "r", encoding="utf-8") as f:
+    cfg = json.load(f)
+
+required = [
+    "ensemble_prm_num_heads",
+    "ensemble_prm_hidden_dim",
+    "ensemble_prm_dropout",
+    "ensemble_prm_use_prior_network",
+    "ensemble_prm_prior_scale",
+]
+
+missing = [k for k in required if k not in cfg]
+
+if missing:
+    raise RuntimeError(
+        "The supplied checkpoint is missing required EnsemblePRM "
+        f"configuration fields: {missing}"
+    )
+
+print("========== Loaded EnsemblePRM config ==========")
+for key in required:
+    print(f"{key}: {cfg[key]}")
+
+print(
+    "ensemble_prm_bootstrap_prob:",
+    cfg.get("ensemble_prm_bootstrap_prob", "<not stored>")
+)
+print("checkpoint prm_loss_type:", cfg.get("prm_loss_type"))
+print("================================================")
+PY
+
+
+# ============================================================
+# Bayesian belief network
+# ============================================================
+
+# Belief-network architecture.
+BELIEF_HIDDEN_DIM=${BELIEF_HIDDEN_DIM:-256}
+BELIEF_DROPOUT=${BELIEF_DROPOUT:-0.0}
+BELIEF_USE_REWARD_PROBS=${BELIEF_USE_REWARD_PROBS:-True}
+
+# Reliability posterior objective:
+#
+#   L_rel =
+#       - E_{alpha_rel}[log likelihood]
+#       + beta_1 KL(alpha_rel || Uniform)
+#
+BELIEF_BETA_KL=${BELIEF_BETA_KL:-0.05}
+
+# False:
+#   use the full Binomial log likelihood
+#       K log(mu) + (N-K) log(1-mu)
+#
+# True:
+#   divide the likelihood by N.
+BELIEF_LOGLIK_NORMALIZE_BY_N=${BELIEF_LOGLIK_NORMALIZE_BY_N:-False}
+
+
+# ============================================================
+# Conservatism-aware belief calibration
+#
+# alpha_final_m
+#   ∝ alpha_rel_m * exp(-reward_m / beta_2)
+#
+# NOTE:
+# beta_2 does NOT affect belief-network training gradients.
+# It can be overridden at evaluation time without retraining.
+# ============================================================
+BELIEF_USE_CONSERVATISM=${BELIEF_USE_CONSERVATISM:-True}
+BELIEF_CONSERVATISM_BETA=${BELIEF_CONSERVATISM_BETA:-0.1}
+
+
+# ============================================================
+# PRM data split
+#
+# The EnsemblePRM checkpoint must have been trained on the
+# complementary "ensemble" subset using exactly the same:
+#
+#   META_PATH
+#   split ratio
+#   split seed
+#
+# BayesianPRM uses the "belief" subset.
+# ============================================================
 PRM_DATA_SPLIT_ENABLE=${PRM_DATA_SPLIT_ENABLE:-True}
 PRM_DATA_SPLIT_RATIO=${PRM_DATA_SPLIT_RATIO:-0.8}
 PRM_DATA_SPLIT_SEED=${PRM_DATA_SPLIT_SEED:-42}
 
-mkdir -p "${ENSEMBLE_OUTPUT_DIR}"
-mkdir -p "${BAYESIAN_OUTPUT_DIR}"
 
-# =========================
-# Ensemble PRM hyperparameters
-# =========================
-ENSEMBLE_PRM_NUM_HEADS=${ENSEMBLE_PRM_NUM_HEADS:-5}
-ENSEMBLE_PRM_HIDDEN_DIM=${ENSEMBLE_PRM_HIDDEN_DIM:-256}
-ENSEMBLE_PRM_DROPOUT=${ENSEMBLE_PRM_DROPOUT:-0.0}
-
-# =========================
-# Bayesian belief hyperparameters
-# =========================
-BELIEF_HIDDEN_DIM=${BELIEF_HIDDEN_DIM:-256}
-BELIEF_DROPOUT=${BELIEF_DROPOUT:-0.0}
-BELIEF_USE_REWARD_PROBS=${BELIEF_USE_REWARD_PROBS:-True}
-BELIEF_LOGLIK_NORMALIZE_BY_N=${BELIEF_LOGLIK_NORMALIZE_BY_N:-False}
-
-BELIEF_USE_CONSERVATISM=${BELIEF_USE_CONSERVATISM:-True}
-BELIEF_CONSERVATISM_BETA=${BELIEF_CONSERVATISM_BETA:-0.1}
-
-# =========================
-# Batch / distributed configs
-# =========================
+# ============================================================
+# Optimization
+# ============================================================
 BATCH_SIZE=${BATCH_SIZE:-512}
 PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-2}
-GRADIENT_ACC=$((BATCH_SIZE / PER_DEVICE_BATCH_SIZE / GPUS))
 
-NNODES=${NNODES:-1}
-NODE_RANK=${NODE_RANK:-0}
-MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
-NPROC_PER_NODE=${NPROC_PER_NODE:-$GPUS}
+DENOM=$((PER_DEVICE_BATCH_SIZE * GPUS))
 
+if (( BATCH_SIZE % DENOM != 0 )); then
+    echo "ERROR: BATCH_SIZE must be divisible by"
+    echo "       PER_DEVICE_BATCH_SIZE * GPUS."
+    echo
+    echo "BATCH_SIZE=${BATCH_SIZE}"
+    echo "PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE}"
+    echo "GPUS=${GPUS}"
+    exit 1
+fi
+
+GRADIENT_ACC=$((BATCH_SIZE / DENOM))
+
+LEARNING_RATE=${LEARNING_RATE:-1e-5}
+WEIGHT_DECAY=${WEIGHT_DECAY:-0.05}
+NUM_TRAIN_EPOCHS=${NUM_TRAIN_EPOCHS:-1}
+WARMUP_RATIO=${WARMUP_RATIO:-0.05}
+
+SAVE_STEPS=${SAVE_STEPS:-100}
+SAVE_TOTAL_LIMIT=${SAVE_TOTAL_LIMIT:-1}
+
+# True = much smaller checkpoints, but optimizer/scheduler state
+# is not available for a strict training resume.
+SAVE_ONLY_MODEL=${SAVE_ONLY_MODEL:-True}
+
+
+# ============================================================
+# Optional short smoke test
+# ============================================================
+MAX_STEPS=${MAX_STEPS:-""}
+MAX_STEPS_ARGS=()
+
+if [ -n "${MAX_STEPS}" ]; then
+    MAX_STEPS_ARGS+=(--max_steps "${MAX_STEPS}")
+fi
+
+
+# ============================================================
+# Resume Bayesian belief training
+# ============================================================
+RESUME_BELIEF_TRAINING=${RESUME_BELIEF_TRAINING:-0}
+
+BAYESIAN_MODEL_PATH="${ENSEMBLE_CHECKPOINT}"
+BAYESIAN_RESUME_ARGS=()
+
+if [ "${RESUME_BELIEF_TRAINING}" = "1" ]; then
+
+    LATEST_BAYESIAN_CHECKPOINT="$(
+        find "${BAYESIAN_OUTPUT_DIR}" \
+            -maxdepth 1 \
+            -type d \
+            -name "checkpoint-*" \
+            2>/dev/null \
+        | sort -V \
+        | tail -n 1
+    )"
+
+    if [ -z "${LATEST_BAYESIAN_CHECKPOINT}" ]; then
+        echo "ERROR: RESUME_BELIEF_TRAINING=1 but no Bayesian checkpoint found."
+        exit 1
+    fi
+
+    BAYESIAN_MODEL_PATH="${LATEST_BAYESIAN_CHECKPOINT}"
+
+    BAYESIAN_RESUME_ARGS+=(
+        --resume_from_checkpoint "${LATEST_BAYESIAN_CHECKPOINT}"
+    )
+
+    echo "Resume BayesianPRM from:"
+    echo "  ${LATEST_BAYESIAN_CHECKPOINT}"
+
+else
+
+    echo "Fresh BayesianPRM belief training."
+    echo "Removing old Bayesian checkpoints under:"
+    echo "  ${BAYESIAN_OUTPUT_DIR}"
+
+    rm -rf "${BAYESIAN_OUTPUT_DIR}"/checkpoint-*
+fi
+
+
+# ============================================================
+# Runtime
+# ============================================================
 export PYTHONPATH="${REPO_ROOT}/src:${REPO_ROOT}:${PYTHONPATH:-}"
 export TF_CPP_MIN_LOG_LEVEL=3
 export LAUNCHER=pytorch
 
-# =========================
-# CUDA include path fix
-# =========================
 if [ -z "${CUDA_HOME:-}" ] && command -v nvcc >/dev/null 2>&1; then
-  export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"
+    export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"
 fi
 
 if [ -n "${CUDA_HOME:-}" ]; then
-  export PATH="${CUDA_HOME}/bin:${PATH}"
+    export PATH="${CUDA_HOME}/bin:${PATH}"
 fi
 
 CUDA_TARGETS_INCLUDE="${CUDA_HOME:-}/targets/x86_64-linux/include"
 CUDA_CCCL_INCLUDE="${CUDA_HOME:-}/targets/x86_64-linux/include/cccl"
 
 if [ -d "${CUDA_TARGETS_INCLUDE}" ]; then
-  export CPATH="${CUDA_TARGETS_INCLUDE}:${CPATH:-}"
-  export CPLUS_INCLUDE_PATH="${CUDA_TARGETS_INCLUDE}:${CPLUS_INCLUDE_PATH:-}"
+    export CPATH="${CUDA_TARGETS_INCLUDE}:${CPATH:-}"
+    export CPLUS_INCLUDE_PATH="${CUDA_TARGETS_INCLUDE}:${CPLUS_INCLUDE_PATH:-}"
 fi
 
 if [ -d "${CUDA_CCCL_INCLUDE}" ]; then
-  export CPATH="${CUDA_CCCL_INCLUDE}:${CPATH:-}"
-  export CPLUS_INCLUDE_PATH="${CUDA_CCCL_INCLUDE}:${CPLUS_INCLUDE_PATH:-}"
+    export CPATH="${CUDA_CCCL_INCLUDE}:${CPATH:-}"
+    export CPLUS_INCLUDE_PATH="${CUDA_CCCL_INCLUDE}:${CPLUS_INCLUDE_PATH:-}"
 fi
 
 export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-/inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/cache/torch_extensions}
 mkdir -p "${TORCH_EXTENSIONS_DIR}"
 
-# =========================
-# Shared Beta-Binom compatibility args
-# These are skipped internally when prm_loss_type != beta_binom.
-# =========================
-BETA_BINOM_KAPPA_MIN=${BETA_BINOM_KAPPA_MIN:-1e-3}
-BETA_BINOM_KAPPA_INIT=${BETA_BINOM_KAPPA_INIT:-4.0}
-BETA_BINOM_EVI_REG=${BETA_BINOM_EVI_REG:-5e-2}
-BETA_BINOM_KAPPA_HEAD_LR_MULT=${BETA_BINOM_KAPPA_HEAD_LR_MULT:-10.0}
 
-# =========================
-# Optional smoke-test max steps
-# Set MAX_STEPS=2 for quick debug.
-# Empty means normal epoch-based training.
-# =========================
-MAX_STEPS=${MAX_STEPS:-""}
-MAX_STEPS_ARGS=()
-if [ -n "${MAX_STEPS}" ]; then
-  MAX_STEPS_ARGS+=(--max_steps "${MAX_STEPS}")
-fi
-
-# =========================
-# Default WandB names
-# =========================
-if is_true "${ENSEMBLE_PRM_USE_PRIOR_NETWORK}"; then
-  DEFAULT_ENSEMBLE_WANDB_NAME="ensemble-prior-${model_name}-visualprm400k"
-  DEFAULT_ENSEMBLE_WANDB_RUN_GROUP="ensemble-prior-${model_name}"
-  DEFAULT_ENSEMBLE_WANDB_TAGS="visualprm400k,ensemble,ensemble_prior"
-
-  DEFAULT_BAYESIAN_WANDB_NAME="bayesian-prior-${model_name}-visualprm400k"
-  DEFAULT_BAYESIAN_WANDB_RUN_GROUP="bayesian-prior-${model_name}"
-  DEFAULT_BAYESIAN_WANDB_TAGS="visualprm400k,bayesian,ensemble_prior"
-else
-  DEFAULT_ENSEMBLE_WANDB_NAME="ensemble-${model_name}-visualprm400k"
-  DEFAULT_ENSEMBLE_WANDB_RUN_GROUP="ensemble-${model_name}"
-  DEFAULT_ENSEMBLE_WANDB_TAGS="visualprm400k,ensemble"
-
-  DEFAULT_BAYESIAN_WANDB_NAME="bayesian-${model_name}-visualprm400k"
-  DEFAULT_BAYESIAN_WANDB_RUN_GROUP="bayesian-${model_name}"
-  DEFAULT_BAYESIAN_WANDB_TAGS="visualprm400k,bayesian"
-fi
-
-# =========================
-# Stage 1: train or load ensemble PRM
-# =========================
-if [ "${LOAD_ENSEMBLE_CHECKPOINT}" = "0" ]; then
-  echo "========== Stage 1: Train ensemble PRM =========="
-
-  OUTPUT_DIR="${ENSEMBLE_OUTPUT_DIR}" \
-  RESUME_TRAINING="${RESUME_ENSEMBLE_TRAINING}" \
-  SAVE_ONLY_MODEL="${SAVE_ONLY_MODEL}" \
-  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
-  GPUS="${GPUS}" \
-  model_name="${model_name}" \
-  MASTER_PORT="${MASTER_PORT}" \
-  WANDB_MODE="${WANDB_MODE:-offline}" \
-  WANDB_PROJECT="${WANDB_PROJECT:-Beta-PRM}" \
-  WANDB_NAME="${ENSEMBLE_WANDB_NAME:-${DEFAULT_ENSEMBLE_WANDB_NAME}}" \
-  WANDB_RUN_GROUP="${ENSEMBLE_WANDB_RUN_GROUP:-${DEFAULT_ENSEMBLE_WANDB_RUN_GROUP}}" \
-  WANDB_TAGS="${ENSEMBLE_WANDB_TAGS:-${DEFAULT_ENSEMBLE_WANDB_TAGS}}" \
-  META_PATH="${META_PATH}" \
-  MODEL_PATH="${MODEL_PATH}" \
-  DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG}" \
-  BATCH_SIZE="${BATCH_SIZE}" \
-  PER_DEVICE_BATCH_SIZE="${PER_DEVICE_BATCH_SIZE}" \
-  MAX_STEPS="${MAX_STEPS}" \
-  PRM_DATA_SPLIT_ENABLE="${PRM_DATA_SPLIT_ENABLE}" \
-  PRM_DATA_SPLIT_RATIO="${PRM_DATA_SPLIT_RATIO}" \
-  PRM_DATA_SPLIT_SEED="${PRM_DATA_SPLIT_SEED}" \
-  PRM_DATA_SPLIT_PART="ensemble" \
-  ENSEMBLE_PRM_NUM_HEADS="${ENSEMBLE_PRM_NUM_HEADS}" \
-  ENSEMBLE_PRM_HIDDEN_DIM="${ENSEMBLE_PRM_HIDDEN_DIM}" \
-  ENSEMBLE_PRM_DROPOUT="${ENSEMBLE_PRM_DROPOUT}" \
-  ENSEMBLE_PRM_USE_PRIOR_NETWORK="${ENSEMBLE_PRM_USE_PRIOR_NETWORK}" \
-  ENSEMBLE_PRM_PRIOR_SCALE="${ENSEMBLE_PRM_PRIOR_SCALE}" \
-  ENSEMBLE_PRM_BOOTSTRAP_PROB="${ENSEMBLE_PRM_BOOTSTRAP_PROB}" \
-  bash "${REPO_ROOT}/shell/scripts/visualprm400k_train_ensemble_prm.sh"
-
-  echo "========== Stage 1 finished =========="
-else
-  echo "========== Stage 1 skipped: LOAD_ENSEMBLE_CHECKPOINT=1 =========="
-fi
-
-# =========================
-# Resolve ensemble checkpoint
-# =========================
-if [ -z "${ENSEMBLE_CHECKPOINT}" ]; then
-  ENSEMBLE_CHECKPOINT="$(
-    find "${ENSEMBLE_OUTPUT_DIR}" -maxdepth 1 -type d -name "checkpoint-*" 2>/dev/null \
-      | sort -V \
-      | tail -n 1
-  )"
-fi
-
-if [ -z "${ENSEMBLE_CHECKPOINT}" ] || [ ! -d "${ENSEMBLE_CHECKPOINT}" ]; then
-  echo "ERROR: No valid ensemble checkpoint found."
-  echo "ENSEMBLE_CHECKPOINT='${ENSEMBLE_CHECKPOINT}'"
-  echo "ENSEMBLE_OUTPUT_DIR='${ENSEMBLE_OUTPUT_DIR}'"
-  exit 1
-fi
-
-echo "Using ensemble checkpoint: ${ENSEMBLE_CHECKPOINT}"
-
-# =========================
-# Stage 2 resume / fresh-start logic
-# =========================
-BAYESIAN_RESUME_ARGS=()
-BAYESIAN_MODEL_PATH="${ENSEMBLE_CHECKPOINT}"
-
-if [ "${RESUME_BELIEF_TRAINING}" = "1" ]; then
-  LATEST_BAYESIAN_CHECKPOINT="$(
-    find "${BAYESIAN_OUTPUT_DIR}" -maxdepth 1 -type d -name "checkpoint-*" 2>/dev/null \
-      | sort -V \
-      | tail -n 1
-  )"
-
-  if [ -n "${LATEST_BAYESIAN_CHECKPOINT}" ] && [ -d "${LATEST_BAYESIAN_CHECKPOINT}" ]; then
-    echo "Auto resume Bayesian belief training from: ${LATEST_BAYESIAN_CHECKPOINT}"
-    BAYESIAN_MODEL_PATH="${LATEST_BAYESIAN_CHECKPOINT}"
-    BAYESIAN_RESUME_ARGS+=(--resume_from_checkpoint "${LATEST_BAYESIAN_CHECKPOINT}")
-  else
-    echo "RESUME_BELIEF_TRAINING=1 but no Bayesian checkpoint found. Start belief training from ensemble checkpoint."
-  fi
-else
-  echo "Resume disabled for Bayesian belief training. Remove old Bayesian checkpoints."
-  rm -rf "${BAYESIAN_OUTPUT_DIR}"/checkpoint-*
-fi
-
-# =========================
-# WandB for Stage 2
-# =========================
+# ============================================================
+# WandB
+# ============================================================
 export WANDB_MODE=${WANDB_MODE:-offline}
 export WANDB_PROJECT=${WANDB_PROJECT:-"Beta-PRM"}
-export WANDB_NAME=${BAYESIAN_WANDB_NAME:-"${DEFAULT_BAYESIAN_WANDB_NAME}"}
-export WANDB_RUN_GROUP=${BAYESIAN_WANDB_RUN_GROUP:-"${DEFAULT_BAYESIAN_WANDB_RUN_GROUP}"}
-export WANDB_TAGS=${BAYESIAN_WANDB_TAGS:-"${DEFAULT_BAYESIAN_WANDB_TAGS}"}
+export WANDB_NAME=${WANDB_NAME:-"bayesian-${model_name}-visualprm400k"}
+export WANDB_RUN_GROUP=${WANDB_RUN_GROUP:-"bayesian-${model_name}"}
+export WANDB_TAGS=${WANDB_TAGS:-"visualprm400k,bayesian"}
 export WANDB_DIR=${WANDB_DIR:-"${BAYESIAN_OUTPUT_DIR}/wandb"}
+
 mkdir -p "${WANDB_DIR}"
 
-# =========================
-# Stage 2: train BayesianPRM belief network
-# =========================
-echo "========== Stage 2: Train BayesianPRM belief network =========="
-echo "REPO_ROOT: ${REPO_ROOT}"
-echo "BAYESIAN_MODEL_PATH: ${BAYESIAN_MODEL_PATH}"
+
+# ============================================================
+# Summary
+# ============================================================
+echo "================ BayesianPRM training ================"
 echo "ENSEMBLE_CHECKPOINT: ${ENSEMBLE_CHECKPOINT}"
-echo "ENSEMBLE_OUTPUT_DIR: ${ENSEMBLE_OUTPUT_DIR}"
+echo "BAYESIAN_MODEL_PATH: ${BAYESIAN_MODEL_PATH}"
 echo "BAYESIAN_OUTPUT_DIR: ${BAYESIAN_OUTPUT_DIR}"
+echo
 echo "META_PATH: ${META_PATH}"
-echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
+echo "PRM_DATA_SPLIT_ENABLE: ${PRM_DATA_SPLIT_ENABLE}"
+echo "PRM_DATA_SPLIT_RATIO: ${PRM_DATA_SPLIT_RATIO}"
+echo "PRM_DATA_SPLIT_SEED: ${PRM_DATA_SPLIT_SEED}"
+echo
+echo "BELIEF_HIDDEN_DIM: ${BELIEF_HIDDEN_DIM}"
+echo "BELIEF_DROPOUT: ${BELIEF_DROPOUT}"
+echo "BELIEF_USE_REWARD_PROBS: ${BELIEF_USE_REWARD_PROBS}"
+echo "BELIEF_BETA_KL (beta_1): ${BELIEF_BETA_KL}"
+echo "BELIEF_LOGLIK_NORMALIZE_BY_N: ${BELIEF_LOGLIK_NORMALIZE_BY_N}"
+echo
+echo "BELIEF_USE_CONSERVATISM: ${BELIEF_USE_CONSERVATISM}"
+echo "BELIEF_CONSERVATISM_BETA (beta_2): ${BELIEF_CONSERVATISM_BETA}"
+echo
 echo "GPUS: ${GPUS}"
 echo "BATCH_SIZE: ${BATCH_SIZE}"
 echo "PER_DEVICE_BATCH_SIZE: ${PER_DEVICE_BATCH_SIZE}"
 echo "GRADIENT_ACC: ${GRADIENT_ACC}"
-echo "PRM_LOSS_TYPE: bayesian_prm"
-echo "ENSEMBLE_PRM_NUM_HEADS: ${ENSEMBLE_PRM_NUM_HEADS}"
-echo "ENSEMBLE_PRM_HIDDEN_DIM: ${ENSEMBLE_PRM_HIDDEN_DIM}"
-echo "ENSEMBLE_PRM_DROPOUT: ${ENSEMBLE_PRM_DROPOUT}"
-echo "ENSEMBLE_PRM_USE_PRIOR_NETWORK: ${ENSEMBLE_PRM_USE_PRIOR_NETWORK}"
-echo "ENSEMBLE_PRM_PRIOR_SCALE: ${ENSEMBLE_PRM_PRIOR_SCALE}"
-echo "PRM_DATA_SPLIT_ENABLE: ${PRM_DATA_SPLIT_ENABLE}"
-echo "PRM_DATA_SPLIT_RATIO: ${PRM_DATA_SPLIT_RATIO}"
-echo "PRM_DATA_SPLIT_SEED: ${PRM_DATA_SPLIT_SEED}"
-echo "BELIEF_HIDDEN_DIM: ${BELIEF_HIDDEN_DIM}"
-echo "BELIEF_DROPOUT: ${BELIEF_DROPOUT}"
-echo "BELIEF_BETA_KL: ${BELIEF_BETA_KL}"
-echo "BELIEF_USE_REWARD_PROBS: ${BELIEF_USE_REWARD_PROBS}"
-echo "BELIEF_LOGLIK_NORMALIZE_BY_N: ${BELIEF_LOGLIK_NORMALIZE_BY_N}"
-echo "MAX_STEPS: ${MAX_STEPS}"
-echo "WANDB_PROJECT: ${WANDB_PROJECT}"
-echo "WANDB_NAME: ${WANDB_NAME}"
-echo "WANDB_RUN_GROUP: ${WANDB_RUN_GROUP}"
-echo "WANDB_TAGS: ${WANDB_TAGS}"
-echo "=================================="
+echo "LEARNING_RATE: ${LEARNING_RATE}"
+echo "NUM_TRAIN_EPOCHS: ${NUM_TRAIN_EPOCHS}"
+echo "========================================================"
 
+
+# ============================================================
+# Train Bayesian belief network
+# ============================================================
 python -m torch.distributed.run \
-  --nnodes=${NNODES} \
-  --node_rank=${NODE_RANK} \
-  --master_addr=${MASTER_ADDR} \
-  --nproc_per_node=${NPROC_PER_NODE} \
-  --master_port=${MASTER_PORT} \
-  "${REPO_ROOT}/src/internvl/train/internvl_chat_finetune_beta_binom.py" \
-  --model_name_or_path "${BAYESIAN_MODEL_PATH}" \
-  --conv_style "internvl2_5" \
-  --use_fast_tokenizer False \
-  --output_dir "${BAYESIAN_OUTPUT_DIR}" \
-  "${BAYESIAN_RESUME_ARGS[@]}" \
-  --meta_path "${META_PATH}" \
-  --overwrite_output_dir True \
-  --force_image_size 448 \
-  --max_dynamic_patch 6 \
-  --down_sample_ratio 0.5 \
-  --drop_path_rate 0.4 \
-  --freeze_llm True \
-  --freeze_mlp True \
-  --freeze_backbone True \
-  --vision_select_layer -1 \
-  --dataloader_num_workers 4 \
-  --bf16 True \
-  --num_train_epochs 1 \
-  "${MAX_STEPS_ARGS[@]}" \
-  --per_device_train_batch_size ${PER_DEVICE_BATCH_SIZE} \
-  --gradient_accumulation_steps ${GRADIENT_ACC} \
-  --save_strategy "steps" \
-  --save_only_model ${SAVE_ONLY_MODEL} \
-  --save_steps 100 \
-  --save_total_limit 1 \
-  --learning_rate 1e-5 \
-  --weight_decay 0.05 \
-  --warmup_ratio 0.05 \
-  --lr_scheduler_type "cosine" \
-  --logging_steps 1 \
-  --max_seq_length 8192 \
-  --prm_loss_type bayesian_prm \
-  --ensemble_prm_num_heads ${ENSEMBLE_PRM_NUM_HEADS} \
-  --ensemble_prm_hidden_dim ${ENSEMBLE_PRM_HIDDEN_DIM} \
-  --ensemble_prm_dropout ${ENSEMBLE_PRM_DROPOUT} \
-  --ensemble_prm_use_prior_network ${ENSEMBLE_PRM_USE_PRIOR_NETWORK} \
-  --ensemble_prm_prior_scale ${ENSEMBLE_PRM_PRIOR_SCALE} \
-  --belief_hidden_dim ${BELIEF_HIDDEN_DIM} \
-  --belief_dropout ${BELIEF_DROPOUT} \
-  --belief_beta_kl ${BELIEF_BETA_KL} \
-  --belief_use_reward_probs ${BELIEF_USE_REWARD_PROBS} \
-  --belief_loglik_normalize_by_n ${BELIEF_LOGLIK_NORMALIZE_BY_N} \
-  --belief_use_conservatism ${BELIEF_USE_CONSERVATISM} \
-  --belief_conservatism_beta ${BELIEF_CONSERVATISM_BETA} \
-  --prm_data_split_enable ${PRM_DATA_SPLIT_ENABLE} \
-  --prm_data_split_ratio ${PRM_DATA_SPLIT_RATIO} \
-  --prm_data_split_seed ${PRM_DATA_SPLIT_SEED} \
-  --prm_data_split_part belief \
-  --beta_binom_kappa_min ${BETA_BINOM_KAPPA_MIN} \
-  --beta_binom_kappa_init ${BETA_BINOM_KAPPA_INIT} \
-  --beta_binom_evi_reg ${BETA_BINOM_EVI_REG} \
-  --beta_binom_kappa_head_lr_mult ${BETA_BINOM_KAPPA_HEAD_LR_MULT} \
-  --do_train True \
-  --grad_checkpoint True \
-  --group_by_length True \
-  --dynamic_image_size True \
-  --use_thumbnail True \
-  --ps_version 'v2' \
-  --deepspeed "${DEEPSPEED_CONFIG}" \
-  --report_to "wandb" \
-  --run_name "${WANDB_NAME}" \
-  2>&1 | python -u -c '
+    --nnodes="${NNODES}" \
+    --node_rank="${NODE_RANK}" \
+    --master_addr="${MASTER_ADDR}" \
+    --nproc_per_node="${NPROC_PER_NODE}" \
+    --master_port="${MASTER_PORT}" \
+    "${REPO_ROOT}/src/internvl/train/internvl_chat_finetune_beta_binom.py" \
+    \
+    --model_name_or_path "${BAYESIAN_MODEL_PATH}" \
+    --prm_loss_type bayesian_prm \
+    \
+    --conv_style "internvl2_5" \
+    --use_fast_tokenizer False \
+    --force_image_size 448 \
+    --max_dynamic_patch 6 \
+    --down_sample_ratio 0.5 \
+    --drop_path_rate 0.4 \
+    --vision_select_layer -1 \
+    --max_seq_length 8192 \
+    --dynamic_image_size True \
+    --use_thumbnail True \
+    --ps_version v2 \
+    \
+    --meta_path "${META_PATH}" \
+    --prm_data_split_enable "${PRM_DATA_SPLIT_ENABLE}" \
+    --prm_data_split_ratio "${PRM_DATA_SPLIT_RATIO}" \
+    --prm_data_split_seed "${PRM_DATA_SPLIT_SEED}" \
+    --prm_data_split_part belief \
+    \
+    --belief_hidden_dim "${BELIEF_HIDDEN_DIM}" \
+    --belief_dropout "${BELIEF_DROPOUT}" \
+    --belief_beta_kl "${BELIEF_BETA_KL}" \
+    --belief_use_reward_probs "${BELIEF_USE_REWARD_PROBS}" \
+    --belief_loglik_normalize_by_n "${BELIEF_LOGLIK_NORMALIZE_BY_N}" \
+    --belief_use_conservatism "${BELIEF_USE_CONSERVATISM}" \
+    --belief_conservatism_beta "${BELIEF_CONSERVATISM_BETA}" \
+    \
+    --freeze_llm True \
+    --freeze_mlp True \
+    --freeze_backbone True \
+    --grad_checkpoint True \
+    \
+    --output_dir "${BAYESIAN_OUTPUT_DIR}" \
+    --overwrite_output_dir True \
+    "${BAYESIAN_RESUME_ARGS[@]}" \
+    \
+    --do_train True \
+    --bf16 True \
+    --num_train_epochs "${NUM_TRAIN_EPOCHS}" \
+    "${MAX_STEPS_ARGS[@]}" \
+    --per_device_train_batch_size "${PER_DEVICE_BATCH_SIZE}" \
+    --gradient_accumulation_steps "${GRADIENT_ACC}" \
+    --learning_rate "${LEARNING_RATE}" \
+    --weight_decay "${WEIGHT_DECAY}" \
+    --warmup_ratio "${WARMUP_RATIO}" \
+    --lr_scheduler_type cosine \
+    \
+    --dataloader_num_workers 4 \
+    --group_by_length True \
+    \
+    --save_strategy steps \
+    --save_steps "${SAVE_STEPS}" \
+    --save_total_limit "${SAVE_TOTAL_LIMIT}" \
+    --save_only_model "${SAVE_ONLY_MODEL}" \
+    \
+    --logging_steps 1 \
+    --deepspeed "${DEEPSPEED_CONFIG}" \
+    --report_to wandb \
+    --run_name "${WANDB_NAME}" \
+    \
+    2>&1 | python -u -c '
 import sys
 from collections import deque
 from pathlib import Path
@@ -401,7 +442,6 @@ def dump():
 for i, line in enumerate(sys.stdin, 1):
     sys.stdout.write(line)
     sys.stdout.flush()
-
     buf.append(line)
 
     if i % flush_interval == 0:

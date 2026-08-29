@@ -356,9 +356,9 @@ class ModelArguments:
         default=0.1,
         metadata={
             "help": (
-                "Temperature beta_2 for the conservative posterior. "
-                "The conservative posterior is computed as "
-                "softmax(-reward / beta_2). Must be positive."
+            "Temperature beta_2 for conservatism-aware belief "
+            "calibration. The final belief is proportional to "
+            "alpha_rel * exp(-reward / beta_2). Must be positive."
             )
         },
     )
@@ -1822,25 +1822,91 @@ def main():
     model.config.prm_loss_type = model_args.prm_loss_type
     model.prm_loss_type = model_args.prm_loss_type
 
-    # Ensemble PRM hyperparameters.
-    model.config.ensemble_prm_num_heads = model_args.ensemble_prm_num_heads
-    model.config.ensemble_prm_hidden_dim = model_args.ensemble_prm_hidden_dim
-    model.config.ensemble_prm_dropout = model_args.ensemble_prm_dropout
-    model.config.ensemble_prm_use_prior_network = (
-    model_args.ensemble_prm_use_prior_network
-    )
-    model.config.ensemble_prm_prior_scale = model_args.ensemble_prm_prior_scale
+    # -------------------------------------------------------------
+    # Ensemble PRM configuration.
+    #
+    # ensemble_prm:
+    #   The ensemble architecture is being created/trained now, so
+    #   CLI arguments define the architecture.
+    #
+    # bayesian_prm:
+    #   model_name_or_path must point to an existing EnsemblePRM
+    #   (or BayesianPRM) checkpoint. The loaded checkpoint config is
+    #   the single source of truth for the frozen ensemble.
+    # -------------------------------------------------------------
+    if model_args.prm_loss_type == 'ensemble_prm':
+        model.config.ensemble_prm_num_heads = (
+            model_args.ensemble_prm_num_heads
+        )
+        model.config.ensemble_prm_hidden_dim = (
+            model_args.ensemble_prm_hidden_dim
+        )
+        model.config.ensemble_prm_dropout = (
+            model_args.ensemble_prm_dropout
+        )
+        model.config.ensemble_prm_use_prior_network = (
+            model_args.ensemble_prm_use_prior_network
+        )
+        model.config.ensemble_prm_prior_scale = (
+            model_args.ensemble_prm_prior_scale
+        )
+        model.config.ensemble_prm_bootstrap_prob = (
+            model_args.ensemble_prm_bootstrap_prob
+        )
 
-    model.ensemble_prm_num_heads = int(model_args.ensemble_prm_num_heads)
-    model.ensemble_prm_hidden_dim = int(model_args.ensemble_prm_hidden_dim)
-    model.ensemble_prm_dropout = float(model_args.ensemble_prm_dropout)
-    model.ensemble_prm_use_prior_network = bool(
-    model_args.ensemble_prm_use_prior_network
-    )
-    model.ensemble_prm_prior_scale = float(model_args.ensemble_prm_prior_scale)
-    
-    model.config.ensemble_prm_bootstrap_prob = model_args.ensemble_prm_bootstrap_prob
-    model.ensemble_prm_bootstrap_prob = float(model_args.ensemble_prm_bootstrap_prob)
+        model.ensemble_prm_num_heads = int(
+            model_args.ensemble_prm_num_heads
+        )
+        model.ensemble_prm_hidden_dim = int(
+            model_args.ensemble_prm_hidden_dim
+        )
+        model.ensemble_prm_dropout = float(
+            model_args.ensemble_prm_dropout
+        )
+        model.ensemble_prm_use_prior_network = bool(
+            model_args.ensemble_prm_use_prior_network
+        )
+        model.ensemble_prm_prior_scale = float(
+            model_args.ensemble_prm_prior_scale
+        )
+        model.ensemble_prm_bootstrap_prob = float(
+            model_args.ensemble_prm_bootstrap_prob
+        )
+
+    elif model_args.prm_loss_type == 'bayesian_prm':
+        required_ensemble_config = (
+            'ensemble_prm_num_heads',
+            'ensemble_prm_hidden_dim',
+            'ensemble_prm_dropout',
+            'ensemble_prm_use_prior_network',
+            'ensemble_prm_prior_scale',
+        )
+
+        missing = [
+            key
+            for key in required_ensemble_config
+            if not hasattr(model.config, key)
+        ]
+
+        if missing:
+            raise RuntimeError(
+                "BayesianPRM requires an existing EnsemblePRM checkpoint "
+                "whose config contains the ensemble architecture. "
+                f"Missing fields: {missing}. "
+                f"model_name_or_path={model_args.model_name_or_path}"
+            )
+
+        if dist.get_rank() == 0:
+            logger.info(
+                "BayesianPRM: using ensemble architecture directly from "
+                "the loaded checkpoint config: "
+                f"num_heads={model.config.ensemble_prm_num_heads}, "
+                f"hidden_dim={model.config.ensemble_prm_hidden_dim}, "
+                f"dropout={model.config.ensemble_prm_dropout}, "
+                f"use_prior_network="
+                f"{model.config.ensemble_prm_use_prior_network}, "
+                f"prior_scale={model.config.ensemble_prm_prior_scale}"
+            )
 
     # BayesianPRM belief-network hyperparameters.
     model.config.belief_hidden_dim = model_args.belief_hidden_dim
@@ -1889,15 +1955,38 @@ def main():
             "use_prior_network",
             False,
         )
-        expected_use_prior = bool(model_args.ensemble_prm_use_prior_network)
-
-        if actual_use_prior != expected_use_prior:
-            raise RuntimeError(
-                "Mismatch between CLI prior setting and constructed ensemble head: "
-                f"CLI ensemble_prm_use_prior_network={expected_use_prior}, "
-                f"head.use_prior_network={actual_use_prior}. "
-                "Please check the checkpoint config or reinitialize the ensemble head."
+        if model_args.prm_loss_type == 'ensemble_prm':
+            expected_use_prior = bool(
+                model_args.ensemble_prm_use_prior_network
             )
+        else:
+            expected_use_prior = bool(
+                model.config.ensemble_prm_use_prior_network
+            )
+
+        if model_args.prm_loss_type == 'bayesian_prm':
+            head = model.ensemble_prm_head
+
+            expected_num_heads = int(
+                model.config.ensemble_prm_num_heads
+            )
+            expected_hidden_dim = int(
+                model.config.ensemble_prm_hidden_dim
+            )
+
+            if head.num_heads != expected_num_heads:
+                raise RuntimeError(
+                    "Ensemble checkpoint inconsistency: "
+                    f"config num_heads={expected_num_heads}, "
+                    f"head num_heads={head.num_heads}."
+                )
+
+            if head.hidden_dim != expected_hidden_dim:
+                raise RuntimeError(
+                    "Ensemble checkpoint inconsistency: "
+                    f"config hidden_dim={expected_hidden_dim}, "
+                    f"head hidden_dim={head.hidden_dim}."
+                )
 
     if model_args.prm_loss_type == 'ensemble_prm':
         # Make sure only the learned ensemble branch is trainable.
