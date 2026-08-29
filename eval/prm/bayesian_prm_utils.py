@@ -37,7 +37,6 @@ def batch_prm_weighted_mu(
     verbose=False,
     belief_use_conservatism=None,
     belief_conservatism_beta=None,
-    belief_hybrid_lambda=None,
 ):
     """
     Basic BayesianPRM evaluator.

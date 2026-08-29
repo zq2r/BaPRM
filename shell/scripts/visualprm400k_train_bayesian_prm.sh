@@ -92,9 +92,8 @@ BELIEF_DROPOUT=${BELIEF_DROPOUT:-0.0}
 BELIEF_USE_REWARD_PROBS=${BELIEF_USE_REWARD_PROBS:-True}
 BELIEF_LOGLIK_NORMALIZE_BY_N=${BELIEF_LOGLIK_NORMALIZE_BY_N:-False}
 
-BELIEF_USE_CONSERVATISM=${BELIEF_USE_CONSERVATISM:-False}
+BELIEF_USE_CONSERVATISM=${BELIEF_USE_CONSERVATISM:-True}
 BELIEF_CONSERVATISM_BETA=${BELIEF_CONSERVATISM_BETA:-0.1}
-BELIEF_HYBRID_LAMBDA=${BELIEF_HYBRID_LAMBDA:-1.0}
 
 # =========================
 # Batch / distributed configs
@@ -364,7 +363,6 @@ python -m torch.distributed.run \
   --belief_loglik_normalize_by_n ${BELIEF_LOGLIK_NORMALIZE_BY_N} \
   --belief_use_conservatism ${BELIEF_USE_CONSERVATISM} \
   --belief_conservatism_beta ${BELIEF_CONSERVATISM_BETA} \
-  --belief_hybrid_lambda ${BELIEF_HYBRID_LAMBDA} \
   --prm_data_split_enable ${PRM_DATA_SPLIT_ENABLE} \
   --prm_data_split_ratio ${PRM_DATA_SPLIT_RATIO} \
   --prm_data_split_seed ${PRM_DATA_SPLIT_SEED} \

@@ -244,7 +244,6 @@ def evaluate_chat_model():
                     verbose=False,
                     belief_use_conservatism=args.belief_use_conservatism,
                     belief_conservatism_beta=args.belief_conservatism_beta,
-                    belief_hybrid_lambda=args.belief_hybrid_lambda,
                 )
 
                 score = mu
@@ -342,15 +341,6 @@ if __name__ == '__main__':
         default=None,
         help=(
             "Eval-time beta_2 for conservative posterior. "
-            "If omitted, use checkpoint config."
-        ),
-    )
-    parser.add_argument(
-        '--belief-hybrid-lambda',
-        type=float,
-        default=None,
-        help=(
-            "Eval-time lambda for hybrid posterior. "
             "If omitted, use checkpoint config."
         ),
     )

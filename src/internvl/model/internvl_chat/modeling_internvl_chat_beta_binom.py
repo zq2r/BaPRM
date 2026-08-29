@@ -176,9 +176,6 @@ class InternVLChatModel(PreTrainedModel):
         self.belief_conservatism_beta = float(
             getattr(config, "belief_conservatism_beta", 0.1)
         )
-        self.belief_hybrid_lambda = float(
-            getattr(config, "belief_hybrid_lambda", 1.0)
-        )
         self.belief_head = None
         
         self.reset_kappa_head(self.beta_binom_kappa_init)

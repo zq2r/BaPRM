@@ -44,7 +44,6 @@ BAYESIAN_FROM_PRIOR_ENSEMBLE=${BAYESIAN_FROM_PRIOR_ENSEMBLE:-1}
 # false = force conservative posterior off
 BELIEF_USE_CONSERVATISM=${BELIEF_USE_CONSERVATISM:-auto}
 BELIEF_CONSERVATISM_BETA=${BELIEF_CONSERVATISM_BETA:-}
-BELIEF_HYBRID_LAMBDA=${BELIEF_HYBRID_LAMBDA:-}
 
 is_true() {
   case "$(echo "${1:-}" | tr '[:upper:]' '[:lower:]')" in
@@ -218,12 +217,6 @@ PY
         --belief-conservatism-beta "${BELIEF_CONSERVATISM_BETA}"
       )
     fi
-
-    if [ -n "${BELIEF_HYBRID_LAMBDA}" ]; then
-      EXTRA_ARGS+=(
-        --belief-hybrid-lambda "${BELIEF_HYBRID_LAMBDA}"
-      )
-    fi
   fi
 
   if [ "${PRM_MODE}" = "bayesian" ]; then
@@ -231,10 +224,6 @@ PY
 
     if [ -n "${BELIEF_CONSERVATISM_BETA}" ]; then
       EVAL_SETTING_TAG="${EVAL_SETTING_TAG}_beta-${BELIEF_CONSERVATISM_BETA}"
-    fi
-
-    if [ -n "${BELIEF_HYBRID_LAMBDA}" ]; then
-      EVAL_SETTING_TAG="${EVAL_SETTING_TAG}_lambda-${BELIEF_HYBRID_LAMBDA}"
     fi
 
     EVAL_SETTING_TAG="$(echo "${EVAL_SETTING_TAG}" | tr '/ ' '__')"
@@ -279,7 +268,6 @@ PY
     echo "BAYESIAN_FROM_PRIOR_ENSEMBLE: ${BAYESIAN_FROM_PRIOR_ENSEMBLE}"
     echo "BELIEF_USE_CONSERVATISM: ${BELIEF_USE_CONSERVATISM}"
     echo "BELIEF_CONSERVATISM_BETA: ${BELIEF_CONSERVATISM_BETA}"
-    echo "BELIEF_HYBRID_LAMBDA: ${BELIEF_HYBRID_LAMBDA}"
     echo "EVAL_SETTING_TAG: ${EVAL_SETTING_TAG}"
   fi
 

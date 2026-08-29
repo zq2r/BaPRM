@@ -362,17 +362,6 @@ class ModelArguments:
             )
         },
     )
-    belief_hybrid_lambda: float = field(
-        default=1.0,
-        metadata={
-            "help": (
-                "Mixture coefficient lambda for the hybrid posterior: "
-                "lambda * reliability_posterior + "
-                "(1 - lambda) * conservative_posterior. "
-                "Must be in [0, 1]. lambda=1.0 disables the conservative correction."
-            )
-        },
-    )
     ensemble_prm_bootstrap_prob: float = field(
         default=1.0,
         metadata={
@@ -1867,9 +1856,6 @@ def main():
     model.config.belief_conservatism_beta = (
         model_args.belief_conservatism_beta
     )
-    model.config.belief_hybrid_lambda = (
-        model_args.belief_hybrid_lambda
-    )
 
     model.belief_hidden_dim = int(model_args.belief_hidden_dim)
     model.belief_dropout = float(model_args.belief_dropout)
@@ -1883,9 +1869,6 @@ def main():
     )
     model.belief_conservatism_beta = float(
         model_args.belief_conservatism_beta
-    )
-    model.belief_hybrid_lambda = float(
-        model_args.belief_hybrid_lambda
     )
     
 

@@ -57,7 +57,6 @@ BAYESIAN_FROM_PRIOR_ENSEMBLE=${BAYESIAN_FROM_PRIOR_ENSEMBLE:-1}
 
 BELIEF_USE_CONSERVATISM=${BELIEF_USE_CONSERVATISM:-auto}
 BELIEF_CONSERVATISM_BETA=${BELIEF_CONSERVATISM_BETA:-}
-BELIEF_HYBRID_LAMBDA=${BELIEF_HYBRID_LAMBDA:-}
 
 # Optional explicit checkpoints:
 BETA_CKPT=${BETA_CKPT:-}
@@ -302,20 +301,10 @@ run_one() {
       )
     fi
 
-    if [ -n "${BELIEF_HYBRID_LAMBDA}" ]; then
-      EXTRA_ARGS+=(
-        --belief-hybrid-lambda "${BELIEF_HYBRID_LAMBDA}"
-      )
-    fi
-
     BAYES_TAG="cons-${BELIEF_USE_CONSERVATISM}"
 
     if [ -n "${BELIEF_CONSERVATISM_BETA}" ]; then
       BAYES_TAG="${BAYES_TAG}_beta-${BELIEF_CONSERVATISM_BETA}"
-    fi
-
-    if [ -n "${BELIEF_HYBRID_LAMBDA}" ]; then
-      BAYES_TAG="${BAYES_TAG}_lambda-${BELIEF_HYBRID_LAMBDA}"
     fi
 
     BAYES_TAG="$(echo "${BAYES_TAG}" | tr '/ ' '__')"
