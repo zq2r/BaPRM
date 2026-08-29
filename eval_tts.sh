@@ -21,7 +21,7 @@ model_name=${model_name:-"InternVL3-8B"}
 
 # Can specify one or multiple:
 # beta normal ensemble bayesian
-PRM_MODES=${PRM_MODES:-"normal"}
+PRM_MODES=${PRM_MODES:-"normal beta"}
 
 # Can specify one or multiple:
 # MathVision MathVerse MathVista MMStar
@@ -40,9 +40,14 @@ TTS_SUBSET_MODE=${TTS_SUBSET_MODE:-"random"}
 TTS_REPEATS=${TTS_REPEATS:-20}
 TTS_SEED=${TTS_SEED:-42}
 
+# IAS settings.
+TTS_ENABLE_IAS=${TTS_ENABLE_IAS:-1}
+TTS_IAS_CONFIDENCE=${TTS_IAS_CONFIDENCE:-0.99}
+TTS_IAS_MAX_N=${TTS_IAS_MAX_N:-16}
+
 # 1 = reuse OUT_DIR/prm_output.json when it exists.
 # 0 = rerun PRM inference and overwrite fixed outputs.
-REUSE_RAW=${REUSE_RAW:-1}
+REUSE_RAW=${REUSE_RAW:-0}
 
 MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-1}
 NUM_WORKERS=${NUM_WORKERS:-0}
@@ -391,14 +396,30 @@ run_one() {
     exit 1
   fi
 
-  python eval/tts/evaluate_prm_tts.py \
-    --input-json "${RAW_JSON}" \
-    --output-json "${TTS_JSON}" \
-    --prm-mode "${MODE}" \
-    --n-grid "${N_GRID}" \
-    --subset-mode "${TTS_SUBSET_MODE}" \
-    --repeats "${TTS_REPEATS}" \
+  TTS_ARGS=(
+    --input-json "${RAW_JSON}"
+    --output-json "${TTS_JSON}"
+    --prm-mode "${MODE}"
+    --n-grid "${N_GRID}"
+    --subset-mode "${TTS_SUBSET_MODE}"
+    --repeats "${TTS_REPEATS}"
     --seed "${TTS_SEED}"
+  )
+
+  if is_true "${TTS_ENABLE_IAS}"; then
+    case "${MODE}" in
+      normal|beta)
+        TTS_ARGS+=(
+          --ias
+          --ias-confidence "${TTS_IAS_CONFIDENCE}"
+          --ias-max-n "${TTS_IAS_MAX_N}"
+        )
+        ;;
+    esac
+  fi
+
+  python eval/tts/evaluate_prm_tts.py \
+    "${TTS_ARGS[@]}"
 
   printf "%s\t%s\t%s\n" \
     "${MODE}" \
@@ -449,11 +470,39 @@ with open(manifest, "r", encoding="utf-8") as f:
         with open(path, "r", encoding="utf-8") as g:
             data = json.load(g)
 
+        norm_max_n = (
+            data.get("ias", {}).get(
+                "max_n",
+                max(data["n_grid"]),
+            )
+        )
+
         for n, result in data["results"].items():
+            n_int = int(n)
+
             rows.append({
                 "mode": mode,
                 "benchmark": bench,
-                "N": int(n),
+                "strategy": "fixed",
+                "N": str(n_int),
+                "average_n": float(n_int),
+                "budget_ratio": float(n_int) / norm_max_n,
+                "accuracy_mean": result["accuracy_mean"],
+                "accuracy_std": result["accuracy_std"],
+                "oracle_pass_mean": result["oracle_pass_mean"],
+                "oracle_pass_std": result["oracle_pass_std"],
+            })
+
+        if "ias" in data:
+            result = data["ias"]
+
+            rows.append({
+                "mode": mode,
+                "benchmark": bench,
+                "strategy": "ias",
+                "N": "IAS",
+                "average_n": result["average_n"],
+                "budget_ratio": result["budget_ratio"],
                 "accuracy_mean": result["accuracy_mean"],
                 "accuracy_std": result["accuracy_std"],
                 "oracle_pass_mean": result["oracle_pass_mean"],
@@ -464,7 +513,8 @@ rows.sort(
     key=lambda x: (
         x["mode"],
         x["benchmark"],
-        x["N"],
+        0 if x["strategy"] == "fixed" else 1,
+        x["average_n"],
     )
 )
 
@@ -483,7 +533,10 @@ with open(csv_path, "w", encoding="utf-8", newline="") as f:
         fieldnames=[
             "mode",
             "benchmark",
+            "strategy",
             "N",
+            "average_n",
+            "budget_ratio",
             "accuracy_mean",
             "accuracy_std",
             "oracle_pass_mean",
@@ -494,15 +547,18 @@ with open(csv_path, "w", encoding="utf-8", newline="") as f:
     writer.writerows(rows)
 
 print()
-print("=" * 92)
+print("=" * 120)
 print(
     f"{'Mode':10s} "
     f"{'Benchmark':12s} "
-    f"{'N':>3s} "
+    f"{'Method':7s} "
+    f"{'N':>5s} "
+    f"{'Avg.N':>8s} "
+    f"{'Budget':>8s} "
     f"{'Accuracy':>18s} "
-    f"{'Oracle pass@N':>18s}"
+    f"{'Oracle pass':>18s}"
 )
-print("-" * 92)
+print("-" * 120)
 
 for r in rows:
     acc = (
@@ -518,12 +574,15 @@ for r in rows:
     print(
         f"{r['mode']:10s} "
         f"{r['benchmark']:12s} "
-        f"{r['N']:3d} "
+        f"{r['strategy']:7s} "
+        f"{r['N']:>5s} "
+        f"{r['average_n']:8.2f} "
+        f"{r['budget_ratio']:8.4f} "
         f"{acc:>18s} "
         f"{oracle:>18s}"
     )
 
-print("=" * 92)
+print("=" * 120)
 print(f"JSON: {json_path}")
 print(f"CSV : {csv_path}")
 PY

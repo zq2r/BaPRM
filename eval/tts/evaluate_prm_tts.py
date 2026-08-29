@@ -44,7 +44,12 @@ def mean_std(xs):
     return float(statistics.mean(xs)), float(statistics.pstdev(xs))
 
 
-def validate_data(data, max_n, prm_mode):
+def validate_data(
+    data,
+    max_n,
+    prm_mode,
+    require_ias=False,
+):
     if not isinstance(data, list) or not data:
         raise ValueError("Input evaluator JSON must be a non-empty list.")
 
@@ -65,6 +70,72 @@ def validate_data(data, max_n, prm_mode):
                     f"item {i}: prm_sigma < max N={max_n}"
                 )
 
+        if require_ias:
+            if "ias_mu" not in item:
+                raise ValueError(
+                    f"item {i}: missing ias_mu required by IAS"
+                )
+
+            p = float(item["ias_mu"])
+            if not math.isfinite(p):
+                raise ValueError(
+                    f"item {i}: invalid ias_mu={p}"
+                )
+
+            if not 0.0 <= p <= 1.0:
+                raise ValueError(
+                    f"item {i}: ias_mu must be in [0, 1], got {p}"
+                )
+
+def compute_ias_budget(
+    p,
+    confidence=0.99,
+    max_n=16,
+):
+    p = float(p)
+    confidence = float(confidence)
+    max_n = int(max_n)
+
+    if not 0.0 < confidence < 1.0:
+        raise ValueError(
+            f"IAS confidence must be in (0, 1), got {confidence}"
+        )
+
+    if max_n < 1:
+        raise ValueError(
+            f"IAS max_n must be >= 1, got {max_n}"
+        )
+
+    # Defensive clamp against tiny floating-point errors.
+    p = min(max(p, 0.0), 1.0)
+
+    if p <= 0.0:
+        return max_n
+
+    if p >= 1.0:
+        return 1
+
+    n = math.ceil(
+        math.log1p(-confidence)
+        / math.log1p(-p)
+    )
+
+    return min(max(n, 1), max_n)
+
+
+def build_ias_budgets(
+    data,
+    confidence,
+    max_n,
+):
+    return [
+        compute_ias_budget(
+            item["ias_mu"],
+            confidence=confidence,
+            max_n=max_n,
+        )
+        for item in data
+    ]
 
 def build_permutations(data, max_n, seed, repeat, subset_mode):
     perms = []
@@ -98,10 +169,10 @@ def evaluate_single_candidate(data, perms):
     return correct / len(data), correct
 
 
-def evaluate_oracle(data, perms, n):
+def evaluate_oracle(data, perms, budgets):
     correct = 0
 
-    for item, perm in zip(data, perms):
+    for item, perm, n in zip(data, perms, budgets):
         ids = perm[:n]
         labels = [int(item["labels"][i]) for i in ids]
         correct += int(any(x == 1 for x in labels))
@@ -109,10 +180,14 @@ def evaluate_oracle(data, perms, n):
     return correct / len(data), correct
 
 
-def evaluate_standard_prm(data, perms, n):
+def evaluate_standard_prm(
+    data,
+    perms,
+    budgets,
+):
     correct = 0
 
-    for item, perm in zip(data, perms):
+    for item, perm, n in zip(data, perms, budgets):
         ids = perm[:n]
 
         scores = [
@@ -134,10 +209,14 @@ def evaluate_standard_prm(data, perms, n):
     return correct / len(data), correct
 
 
-def collect_beta_sigmas(data, perms, n):
+def collect_beta_sigmas(
+    data,
+    perms,
+    budgets,
+):
     vals = []
 
-    for item, perm in zip(data, perms):
+    for item, perm, n in zip(data, perms, budgets):
         for idx in perm[:n]:
             vals.extend(
                 float(x)
@@ -167,13 +246,13 @@ def beta_score(mu_steps, sigma_steps, lam, tau):
 def evaluate_beta_setting(
     data,
     perms,
-    n,
+    budgets,
     lam,
     tau,
 ):
     correct = 0
 
-    for item, perm in zip(data, perms):
+    for item, perm, n in zip(data, perms, budgets):
         ids = perm[:n]
 
         scores = [
@@ -199,18 +278,17 @@ def evaluate_beta_setting(
 
     return correct / len(data), correct
 
-
 def evaluate_beta(
     data,
     perms,
-    n,
+    budgets,
     lambdas,
     qs,
 ):
     sigmas = collect_beta_sigmas(
         data,
         perms,
-        n,
+        budgets,
     )
 
     sweep = []
@@ -222,7 +300,7 @@ def evaluate_beta(
             acc, correct = evaluate_beta_setting(
                 data=data,
                 perms=perms,
-                n=n,
+                budgets=budgets,
                 lam=lam,
                 tau=tau,
             )
@@ -274,6 +352,24 @@ def main():
         "--n-grid",
         default="1,2,4,8,16",
     )
+    
+    parser.add_argument(
+        "--ias",
+        action="store_true",
+        help="Enable instance-adaptive BoN evaluation.",
+    )
+
+    parser.add_argument(
+        "--ias-confidence",
+        type=float,
+        default=0.99,
+    )
+
+    parser.add_argument(
+        "--ias-max-n",
+        type=int,
+        default=None,
+    )
 
     parser.add_argument(
         "--subset-mode",
@@ -309,15 +405,35 @@ def main():
     lambdas = parse_float_grid(args.lambdas)
     qs = parse_float_grid(args.budget_q_grid)
 
+    if not ns:
+        raise ValueError("n-grid must not be empty")
+
+    fixed_max_n = max(ns)
+
+    ias_max_n = (
+        args.ias_max_n
+        if args.ias_max_n is not None
+        else fixed_max_n
+    )
+
+    if args.ias and ias_max_n < 1:
+        raise ValueError(
+            f"ias-max-n must be >= 1, got {ias_max_n}"
+        )
+
+    pool_max_n = max(
+        fixed_max_n,
+        ias_max_n if args.ias else fixed_max_n,
+    )
+
     with open(args.input_json, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    max_n = max(ns)
-
     validate_data(
         data,
-        max_n=max_n,
+        max_n=pool_max_n,
         prm_mode=args.prm_mode,
+        require_ias=args.ias,
     )
 
     repeats = args.repeats
@@ -330,19 +446,22 @@ def main():
         "prm_mode": args.prm_mode,
         "num_items": len(data),
         "n_grid": ns,
+        "pool_max_n": pool_max_n,
         "subset_mode": args.subset_mode,
         "repeats": repeats,
         "seed": args.seed,
+        "ias_enabled": args.ias,
         "results": {},
     }
 
     for n in ns:
+        budgets = [n] * len(data)
         repeat_results = []
 
         for r in range(repeats):
             perms = build_permutations(
                 data=data,
-                max_n=max_n,
+                max_n=pool_max_n,
                 seed=args.seed,
                 repeat=r,
                 subset_mode=args.subset_mode,
@@ -351,7 +470,7 @@ def main():
             oracle_acc, oracle_correct = evaluate_oracle(
                 data,
                 perms,
-                n,
+                budgets,
             )
 
             # N=1: no PRM selection.
@@ -374,7 +493,7 @@ def main():
                 best, sweep = evaluate_beta(
                     data=data,
                     perms=perms,
-                    n=n,
+                    budgets=budgets,
                     lambdas=lambdas,
                     qs=qs,
                 )
@@ -394,7 +513,7 @@ def main():
                 acc, correct = evaluate_standard_prm(
                     data,
                     perms,
-                    n,
+                    budgets,
                 )
 
                 repeat_result = {
@@ -455,6 +574,114 @@ def main():
                 f"acc={acc_mean:.4f} ± {acc_std:.4f} "
                 f"oracle={oracle_mean:.4f}"
             )
+
+    if args.ias:
+        ias_budgets = build_ias_budgets(
+            data=data,
+            confidence=args.ias_confidence,
+            max_n=ias_max_n,
+        )
+
+        ias_repeat_results = []
+
+        for r in range(repeats):
+            perms = build_permutations(
+                data=data,
+                max_n=pool_max_n,
+                seed=args.seed,
+                repeat=r,
+                subset_mode=args.subset_mode,
+            )
+
+            oracle_acc, oracle_correct = evaluate_oracle(
+                data,
+                perms,
+                ias_budgets,
+            )
+
+            if args.prm_mode == "beta":
+                best, sweep = evaluate_beta(
+                    data=data,
+                    perms=perms,
+                    budgets=ias_budgets,
+                    lambdas=lambdas,
+                    qs=qs,
+                )
+
+                repeat_result = {
+                    "repeat": r,
+                    "accuracy": best["accuracy"],
+                    "correct": best["correct"],
+                    "total": len(data),
+                    "oracle_accuracy": oracle_acc,
+                    "oracle_correct": oracle_correct,
+                    "best": best,
+                    "risk_budget_sweep": sweep,
+                }
+
+            else:
+                acc, correct = evaluate_standard_prm(
+                    data,
+                    perms,
+                    ias_budgets,
+                )
+
+                repeat_result = {
+                    "repeat": r,
+                    "accuracy": acc,
+                    "correct": correct,
+                    "total": len(data),
+                    "oracle_accuracy": oracle_acc,
+                    "oracle_correct": oracle_correct,
+                }
+
+            ias_repeat_results.append(repeat_result)
+
+        ias_accs = [
+            x["accuracy"]
+            for x in ias_repeat_results
+        ]
+
+        ias_oracle_accs = [
+            x["oracle_accuracy"]
+            for x in ias_repeat_results
+        ]
+
+        ias_acc_mean, ias_acc_std = mean_std(ias_accs)
+        ias_oracle_mean, ias_oracle_std = mean_std(
+            ias_oracle_accs
+        )
+
+        average_n = safe_mean(ias_budgets)
+
+        histogram = {
+            str(n): ias_budgets.count(n)
+            for n in range(1, ias_max_n + 1)
+            if ias_budgets.count(n) > 0
+        }
+
+        output["ias"] = {
+            "confidence": args.ias_confidence,
+            "max_n": ias_max_n,
+            "average_n": average_n,
+            "budget_ratio": average_n / ias_max_n,
+            "budget_histogram": histogram,
+            "accuracy_mean": ias_acc_mean,
+            "accuracy_std": ias_acc_std,
+            "oracle_pass_mean": ias_oracle_mean,
+            "oracle_pass_std": ias_oracle_std,
+            "repeat_results": ias_repeat_results,
+        }
+
+        print(
+            f"IAS    "
+            f"C={args.ias_confidence:.4f} "
+            f"Nmax={ias_max_n} "
+            f"avgN={average_n:.3f} "
+            f"budget={average_n / ias_max_n:.4f} "
+            f"acc={ias_acc_mean:.4f} ± {ias_acc_std:.4f} "
+            f"oracle={ias_oracle_mean:.4f}"
+        )
 
     out = Path(args.output_json)
     out.parent.mkdir(

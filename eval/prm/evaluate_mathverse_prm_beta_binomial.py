@@ -342,6 +342,33 @@ def evaluate_chat_model():
                 prm_kappa_flattened.extend(kappa.tolist())
                 prm_sigma_flattened.extend(sigma.tolist())
 
+
+            # IAS: estimate Beta belief at t=0 (empty reasoning prefix).
+            question = _pick_question_text(data_item)
+            ias_prompt = f'Question: {question}\nProcess: <prm>'
+
+            ias_mu, ias_kappa = batch_prm_mu_kappa(
+                model=model,
+                tokenizer=tokenizer,
+                pixel_values=pixel_values,
+                questions=[ias_prompt],
+                num_patches_list=[pixel_values.shape[0]],
+                verbose=False,
+            )
+
+            if ias_mu.numel() != 1 or ias_kappa.numel() != 1:
+                raise RuntimeError(
+                    f'IAS question-only scoring should return exactly one Beta belief, '
+                    f'but got mu={ias_mu.numel()}, kappa={ias_kappa.numel()}.'
+                )
+
+            ias_sigma = torch.sqrt(
+                ias_mu * (1.0 - ias_mu) / (ias_kappa + 1.0)
+            )
+
+            data_item['ias_mu'] = float(ias_mu.item())
+            data_item['ias_kappa'] = float(ias_kappa.item())
+            data_item['ias_sigma'] = float(ias_sigma.item())
             data_item['prm_scores'] = []
             data_item['prm_mu'] = []
             data_item['prm_kappa'] = []

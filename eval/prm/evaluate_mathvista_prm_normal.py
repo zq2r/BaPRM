@@ -306,6 +306,26 @@ def evaluate_chat_model():
                 prm_mu_flattened.extend(mu.tolist())
 
             data_item['prm_scores'] = []
+            # IAS: estimate success probability at t=0 (empty reasoning prefix).
+            question = _pick_question_text(data_item)
+            ias_prompt = f'Question: {question}\nProcess: <prm>'
+
+            ias_mu = batch_prm_mu(
+                model=model,
+                tokenizer=tokenizer,
+                pixel_values=pixel_values,
+                questions=[ias_prompt],
+                num_patches_list=[pixel_values.shape[0]],
+                verbose=False,
+            )
+
+            if ias_mu.numel() != 1:
+                raise RuntimeError(
+                    f'IAS question-only scoring should return exactly one reward, '
+                    f'but got {ias_mu.numel()}.'
+                )
+
+            data_item['ias_mu'] = float(ias_mu.item())
             data_item['prm_mu'] = []
             curr_len = 0
             for i in range(len(steps_lens)):
