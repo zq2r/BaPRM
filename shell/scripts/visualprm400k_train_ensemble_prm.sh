@@ -47,21 +47,115 @@ fi
 # =========================
 # Resume / fresh-start logic
 # =========================
-# RESUME_TRAINING=1: auto resume from latest checkpoint if exists.
-# RESUME_TRAINING=0: start from scratch and remove old checkpoints.
+#
+# RESUME_TRAINING=1:
+#   - Find the latest checkpoint.
+#   - Resume only if it contains complete Trainer + DeepSpeed states.
+#   - Otherwise remove incomplete checkpoints and start from scratch.
+#
+# RESUME_TRAINING=0:
+#   - Remove old checkpoints and start from scratch.
+# =========================
+
 RESUME_ARGS=()
 
-if [ "${RESUME_TRAINING}" = "1" ]; then
-  LATEST_CHECKPOINT=$(find "${OUTPUT_DIR}" -maxdepth 1 -type d -name "checkpoint-*" 2>/dev/null | sort -V | tail -n 1)
+is_complete_checkpoint() {
+  local ckpt="$1"
+  local ds_step_dir=""
 
-  if [ -n "${LATEST_CHECKPOINT}" ]; then
-    echo "Auto resume enabled. Found latest checkpoint: ${LATEST_CHECKPOINT}"
-    RESUME_ARGS+=(--resume_from_checkpoint "${LATEST_CHECKPOINT}")
-  else
-    echo "Auto resume enabled, but no checkpoint found. Start training from scratch."
+  # Hugging Face Trainer state.
+  if [ ! -s "${ckpt}/trainer_state.json" ]; then
+    return 1
   fi
+
+  # DeepSpeed training state directory.
+  ds_step_dir=$(
+    find "${ckpt}" \
+      -maxdepth 1 \
+      -type d \
+      -name "global_step*" \
+      -print -quit \
+      2>/dev/null
+  )
+
+  if [ -z "${ds_step_dir}" ]; then
+    return 1
+  fi
+
+  # DeepSpeed model state.
+  if ! find "${ds_step_dir}" \
+      -maxdepth 1 \
+      -type f \
+      -name "*model_states.pt" \
+      -size +0c \
+      -print -quit \
+      2>/dev/null | grep -q .; then
+    return 1
+  fi
+
+  # DeepSpeed optimizer state.
+  if ! find "${ds_step_dir}" \
+      -maxdepth 1 \
+      -type f \
+      -name "*optim_states.pt" \
+      -size +0c \
+      -print -quit \
+      2>/dev/null | grep -q .; then
+    return 1
+  fi
+
+  return 0
+}
+
+if [ "${RESUME_TRAINING}" = "1" ]; then
+
+  LATEST_CHECKPOINT=$(
+    find "${OUTPUT_DIR}" \
+      -maxdepth 1 \
+      -type d \
+      -name "checkpoint-*" \
+      2>/dev/null \
+    | sort -V \
+    | tail -n 1
+  )
+
+  if [ -z "${LATEST_CHECKPOINT}" ]; then
+    echo "============================================================"
+    echo "[INFO] RESUME_TRAINING=1"
+    echo "[INFO] No checkpoint found."
+    echo "[INFO] Start EnsemblePRM training from scratch."
+    echo "============================================================"
+
+  elif is_complete_checkpoint "${LATEST_CHECKPOINT}"; then
+    echo "============================================================"
+    echo "[INFO] Found complete EnsemblePRM checkpoint:"
+    echo "       ${LATEST_CHECKPOINT}"
+    echo "[INFO] Resume training from this checkpoint."
+    echo "============================================================"
+
+    RESUME_ARGS+=(
+      --resume_from_checkpoint "${LATEST_CHECKPOINT}"
+    )
+
+  else
+    echo "============================================================"
+    echo "[WARNING] Latest BetaPRM checkpoint is incomplete:"
+    echo "          ${LATEST_CHECKPOINT}"
+    echo "[WARNING] Cannot perform true resume."
+    echo "[INFO] Removing old checkpoints."
+    echo "[INFO] Start EnsemblePRM training from scratch."
+    echo "============================================================"
+
+    rm -rf "${OUTPUT_DIR}"/checkpoint-*
+  fi
+
 else
-  echo "Resume disabled. Remove old checkpoints and start from scratch."
+  echo "============================================================"
+  echo "[INFO] RESUME_TRAINING=0"
+  echo "[INFO] Removing old checkpoints."
+  echo "[INFO] Start EnsemblePRM training from scratch."
+  echo "============================================================"
+
   rm -rf "${OUTPUT_DIR}"/checkpoint-*
 fi
 

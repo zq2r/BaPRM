@@ -2047,11 +2047,17 @@ def main():
             "use_prior_network",
             False,
         )
-        if model_args.prm_loss_type == 'ensemble_prm':
+        if (
+            model_args.prm_loss_type == 'ensemble_prm'
+            and not is_resume_training
+        ):
+            # Fresh EnsemblePRM: CLI defines the architecture.
             expected_use_prior = bool(
                 model_args.ensemble_prm_use_prior_network
             )
         else:
+            # EnsemblePRM resume or BayesianPRM:
+            # checkpoint config is the source of truth.
             expected_use_prior = bool(
                 model.config.ensemble_prm_use_prior_network
             )

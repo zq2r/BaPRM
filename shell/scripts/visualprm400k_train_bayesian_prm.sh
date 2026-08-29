@@ -42,6 +42,10 @@ export MASTER_PORT=${MASTER_PORT:-4320}
 
 model_name=${model_name:-"InternVL3-8B"}
 
+# True = much smaller checkpoints, but optimizer/scheduler state
+# is not available for a strict training resume.
+SAVE_ONLY_MODEL=${SAVE_ONLY_MODEL:-True}
+RESUME_BELIEF_TRAINING=${RESUME_BELIEF_TRAINING:-0}
 # ============================================================
 # Ensemble checkpoint selector
 #
@@ -53,6 +57,7 @@ model_name=${model_name:-"InternVL3-8B"}
 ENSEMBLE_PRM_USE_PRIOR_NETWORK=${ENSEMBLE_PRM_USE_PRIOR_NETWORK:-True}
 ENSEMBLE_PRM_NUM_HEADS=${ENSEMBLE_PRM_NUM_HEADS:-10}
 ENSEMBLE_PRM_PRIOR_SCALE=${ENSEMBLE_PRM_PRIOR_SCALE:-10}
+BELIEF_BETA_KL=${BELIEF_BETA_KL:-0.05}
 
 # ============================================================
 # Bayesian belief network
@@ -63,13 +68,6 @@ BELIEF_HIDDEN_DIM=${BELIEF_HIDDEN_DIM:-256}
 BELIEF_DROPOUT=${BELIEF_DROPOUT:-0.0}
 BELIEF_USE_REWARD_PROBS=${BELIEF_USE_REWARD_PROBS:-True}
 
-# Reliability posterior objective:
-#
-#   L_rel =
-#       - E_{alpha_rel}[log likelihood]
-#       + beta_1 KL(alpha_rel || Uniform)
-#
-BELIEF_BETA_KL=${BELIEF_BETA_KL:-0.05}
 
 # False:
 #   use the full Binomial log likelihood
@@ -97,10 +95,10 @@ BELIEF_CONSERVATISM_BETA=${BELIEF_CONSERVATISM_BETA:-0.1}
 if [ "${ENSEMBLE_PRM_USE_PRIOR_NETWORK}" = "True" ] || \
    [ "${ENSEMBLE_PRM_USE_PRIOR_NETWORK}" = "true" ]; then
     DEFAULT_ENSEMBLE_OUTPUT_DIR="${REPO_ROOT}/log/ensemble-prior-head${ENSEMBLE_PRM_NUM_HEADS}-scale${ENSEMBLE_PRM_PRIOR_SCALE}-${model_name}-visualprm400k"
-    DEFAULT_BAYESIAN_OUTPUT_DIR="${REPO_ROOT}/log/bayesian-prior-head${ENSEMBLE_PRM_NUM_HEADS}-scale${ENSEMBLE_PRM_PRIOR_SCALE}-beta${BELIEF_CONSERVATISM_BETA}-${model_name}-visualprm400k"
+    DEFAULT_BAYESIAN_OUTPUT_DIR="${REPO_ROOT}/log/bayesian-prior-head${ENSEMBLE_PRM_NUM_HEADS}-scale${ENSEMBLE_PRM_PRIOR_SCALE}-beta${BELIEF_BETA_KL}-${model_name}-visualprm400k"
 else
     DEFAULT_ENSEMBLE_OUTPUT_DIR="${REPO_ROOT}/log/ensemble-head${ENSEMBLE_PRM_NUM_HEADS}-scale${ENSEMBLE_PRM_PRIOR_SCALE}-${model_name}-visualprm400k"
-    DEFAULT_BAYESIAN_OUTPUT_DIR="${REPO_ROOT}/log/bayesian-head${ENSEMBLE_PRM_NUM_HEADS}-scale${ENSEMBLE_PRM_PRIOR_SCALE}-beta${BELIEF_CONSERVATISM_BETA}-${model_name}-visualprm400k"
+    DEFAULT_BAYESIAN_OUTPUT_DIR="${REPO_ROOT}/log/bayesian-head${ENSEMBLE_PRM_NUM_HEADS}-scale${ENSEMBLE_PRM_PRIOR_SCALE}-beta${BELIEF_BETA_KL}-${model_name}-visualprm400k"
 fi
 
 ENSEMBLE_OUTPUT_DIR=${ENSEMBLE_OUTPUT_DIR:-"${DEFAULT_ENSEMBLE_OUTPUT_DIR}"}
@@ -307,9 +305,7 @@ WARMUP_RATIO=${WARMUP_RATIO:-0.05}
 SAVE_STEPS=${SAVE_STEPS:-100}
 SAVE_TOTAL_LIMIT=${SAVE_TOTAL_LIMIT:-1}
 
-# True = much smaller checkpoints, but optimizer/scheduler state
-# is not available for a strict training resume.
-SAVE_ONLY_MODEL=${SAVE_ONLY_MODEL:-True}
+
 
 # ============================================================
 # Optional short smoke test
@@ -324,13 +320,57 @@ fi
 # ============================================================
 # Resume Bayesian belief training
 # ============================================================
-RESUME_BELIEF_TRAINING=${RESUME_BELIEF_TRAINING:-0}
+is_complete_checkpoint() {
+    local ckpt="$1"
+    local ds_step_dir=""
 
+    if [ ! -s "${ckpt}/trainer_state.json" ]; then
+        return 1
+    fi
+
+    ds_step_dir=$(
+        find "${ckpt}" \
+            -maxdepth 1 \
+            -type d \
+            -name "global_step*" \
+            -print -quit \
+            2>/dev/null
+    )
+
+    if [ -z "${ds_step_dir}" ]; then
+        return 1
+    fi
+
+    if ! find "${ds_step_dir}" \
+        -maxdepth 1 \
+        -type f \
+        -name "*model_states.pt" \
+        -size +0c \
+        -print -quit \
+        2>/dev/null | grep -q .; then
+        return 1
+    fi
+
+    if ! find "${ds_step_dir}" \
+        -maxdepth 1 \
+        -type f \
+        -name "*optim_states.pt" \
+        -size +0c \
+        -print -quit \
+        2>/dev/null | grep -q .; then
+        return 1
+    fi
+
+    return 0
+}
+
+# Fresh BayesianPRM always starts from the resolved EnsemblePRM.
 BAYESIAN_MODEL_PATH="${ENSEMBLE_CHECKPOINT}"
 BAYESIAN_RESUME_ARGS=()
 
 if [ "${RESUME_BELIEF_TRAINING}" = "1" ]; then
-    LATEST_BAYESIAN_CHECKPOINT="$(
+
+    LATEST_BAYESIAN_CHECKPOINT=$(
         find "${BAYESIAN_OUTPUT_DIR}" \
             -maxdepth 1 \
             -type d \
@@ -338,26 +378,55 @@ if [ "${RESUME_BELIEF_TRAINING}" = "1" ]; then
             2>/dev/null \
         | sort -V \
         | tail -n 1
-    )"
-
-    if [ -z "${LATEST_BAYESIAN_CHECKPOINT}" ]; then
-        echo "ERROR: RESUME_BELIEF_TRAINING=1 but no Bayesian checkpoint found."
-        exit 1
-    fi
-
-    BAYESIAN_MODEL_PATH="${LATEST_BAYESIAN_CHECKPOINT}"
-    BAYESIAN_RESUME_ARGS+=(
-        --resume_from_checkpoint "${LATEST_BAYESIAN_CHECKPOINT}"
     )
 
-    echo "Resume BayesianPRM from:"
-    echo "  ${LATEST_BAYESIAN_CHECKPOINT}"
+    if [ -z "${LATEST_BAYESIAN_CHECKPOINT}" ]; then
+        echo "============================================================"
+        echo "[INFO] RESUME_BELIEF_TRAINING=1"
+        echo "[INFO] No BayesianPRM checkpoint found."
+        echo "[INFO] Start fresh belief training from EnsemblePRM:"
+        echo "       ${ENSEMBLE_CHECKPOINT}"
+        echo "============================================================"
+
+    elif is_complete_checkpoint "${LATEST_BAYESIAN_CHECKPOINT}"; then
+        echo "============================================================"
+        echo "[INFO] Found complete BayesianPRM checkpoint:"
+        echo "       ${LATEST_BAYESIAN_CHECKPOINT}"
+        echo "[INFO] Resume belief training from this checkpoint."
+        echo "============================================================"
+
+        BAYESIAN_MODEL_PATH="${LATEST_BAYESIAN_CHECKPOINT}"
+
+        BAYESIAN_RESUME_ARGS+=(
+            --resume_from_checkpoint "${LATEST_BAYESIAN_CHECKPOINT}"
+        )
+
+    else
+        echo "============================================================"
+        echo "[WARNING] Latest BayesianPRM checkpoint is incomplete:"
+        echo "          ${LATEST_BAYESIAN_CHECKPOINT}"
+        echo "[WARNING] Cannot perform true resume."
+        echo "[INFO] Removing old Bayesian checkpoints."
+        echo "[INFO] Restart belief training from EnsemblePRM:"
+        echo "       ${ENSEMBLE_CHECKPOINT}"
+        echo "============================================================"
+
+        rm -rf "${BAYESIAN_OUTPUT_DIR}"/checkpoint-*
+
+        BAYESIAN_MODEL_PATH="${ENSEMBLE_CHECKPOINT}"
+    fi
+
 else
-    echo "Fresh BayesianPRM belief training."
-    echo "Removing old Bayesian checkpoints under:"
-    echo "  ${BAYESIAN_OUTPUT_DIR}"
+    echo "============================================================"
+    echo "[INFO] RESUME_BELIEF_TRAINING=0"
+    echo "[INFO] Removing old Bayesian checkpoints."
+    echo "[INFO] Start fresh belief training from EnsemblePRM:"
+    echo "       ${ENSEMBLE_CHECKPOINT}"
+    echo "============================================================"
 
     rm -rf "${BAYESIAN_OUTPUT_DIR}"/checkpoint-*
+
+    BAYESIAN_MODEL_PATH="${ENSEMBLE_CHECKPOINT}"
 fi
 
 # ============================================================
