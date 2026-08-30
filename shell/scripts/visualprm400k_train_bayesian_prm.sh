@@ -31,14 +31,14 @@ export HF_DATASETS_OFFLINE=${HF_DATASETS_OFFLINE:-1}
 # ============================================================
 # Distributed / device
 # ============================================================
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3"}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"4,5,6,7"}
 
 GPUS=${GPUS:-4}
 NNODES=${NNODES:-1}
 NODE_RANK=${NODE_RANK:-0}
 MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
 NPROC_PER_NODE=${NPROC_PER_NODE:-${GPUS}}
-export MASTER_PORT=${MASTER_PORT:-4321}
+export MASTER_PORT=${MASTER_PORT:-4320}
 
 model_name=${model_name:-"InternVL3-8B"}
 
@@ -57,7 +57,7 @@ RESUME_BELIEF_TRAINING=${RESUME_BELIEF_TRAINING:-0}
 ENSEMBLE_PRM_USE_PRIOR_NETWORK=${ENSEMBLE_PRM_USE_PRIOR_NETWORK:-True}
 ENSEMBLE_PRM_NUM_HEADS=${ENSEMBLE_PRM_NUM_HEADS:-10}
 ENSEMBLE_PRM_PRIOR_SCALE=${ENSEMBLE_PRM_PRIOR_SCALE:-10}
-BELIEF_BETA_KL=${BELIEF_BETA_KL:-0.1}
+BELIEF_BETA_KL=${BELIEF_BETA_KL:-0.5}
 
 # ============================================================
 # Bayesian belief network

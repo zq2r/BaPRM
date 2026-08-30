@@ -37,6 +37,7 @@ def batch_prm_weighted_mu(
     verbose=False,
     belief_use_conservatism=None,
     belief_conservatism_beta=None,
+    return_details=False,
 ):
     """
     Basic BayesianPRM evaluator.
@@ -95,7 +96,18 @@ def batch_prm_weighted_mu(
     placeholder_mask = input_ids == prm_token_id
 
     if not placeholder_mask.any():
-        return input_ids.new_zeros((0,), dtype=torch.float32)
+        empty = input_ids.new_zeros(
+            (0,),
+            dtype=torch.float32,
+        )
+
+        if return_details:
+            return {
+                "mu_rel": empty,
+                "mu_final": empty,
+            }
+
+        return empty
 
     if not hasattr(model, "ensemble_prm_head") or model.ensemble_prm_head is None:
         raise RuntimeError(
@@ -131,8 +143,12 @@ def batch_prm_weighted_mu(
         belief_logits.float(),
         dim=-1,
     )
+    # Reliability-aware Bayesian reward before conservatism calibration.
+    mu_rel = (
+        rel_weights * mu_heads
+    ).sum(dim=-1)
 
-    # Conservative posterior and final hybrid posterior.
+    # Conservatism-aware calibration of the reliability belief.
     #
     # These attributes are loaded from checkpoint config by InternVLChatModel.
     # If conservatism is disabled, this exactly reduces to the original
@@ -177,7 +193,16 @@ def batch_prm_weighted_mu(
     else:
         post_weights = rel_weights
 
-    # Final BayesianPRM score.
+    # Final conservatism-aware BayesianPRM reward.
     # Shape: [P]
-    mu_bayes = (post_weights * mu_heads).sum(dim=-1)
-    return mu_bayes
+    mu_final = (
+        post_weights * mu_heads
+    ).sum(dim=-1)
+
+    if return_details:
+        return {
+            "mu_rel": mu_rel,
+            "mu_final": mu_final,
+        }
+
+    return mu_final
