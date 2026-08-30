@@ -108,7 +108,7 @@ def batch_prm_weighted_mu(
         )
 
         if return_details:
-            num_heads = len(model.ensemble_prm_head.heads)
+            num_heads = model.ensemble_prm_head.num_heads
 
             empty_heads = input_ids.new_zeros(
                 (0, num_heads),
