@@ -102,11 +102,18 @@ def batch_prm_weighted_mu(
         )
 
         if return_details:
+            num_heads = len(model.ensemble_prm_head.heads)
+
+            empty_heads = input_ids.new_zeros(
+                (0, num_heads),
+                dtype=torch.float32,
+            )
+
             return {
-                "mu_heads": mu_heads,
-                "rel_weights": rel_weights,
-                "mu_rel": mu_rel,
-                "mu_final": mu_final,
+                "mu_heads": empty_heads,
+                "rel_weights": empty_heads,
+                "mu_rel": empty,
+                "mu_final": empty,
             }
 
         return empty
@@ -203,6 +210,8 @@ def batch_prm_weighted_mu(
 
     if return_details:
         return {
+            "mu_heads": mu_heads,
+            "rel_weights": rel_weights,
             "mu_rel": mu_rel,
             "mu_final": mu_final,
         }
