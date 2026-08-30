@@ -397,7 +397,7 @@ run_one() {
 
   if is_true "${TTS_ENABLE_IAS}"; then
     case "${MODE}" in
-      normal|beta)
+      normal|beta|bayesian)
         TTS_ARGS+=(
           --ias
           --ias-confidence "${TTS_IAS_CONFIDENCE}"
