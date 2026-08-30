@@ -58,13 +58,14 @@ ENSEMBLE_PRM_USE_PRIOR_NETWORK=${ENSEMBLE_PRM_USE_PRIOR_NETWORK:-True}
 ENSEMBLE_PRM_NUM_HEADS=${ENSEMBLE_PRM_NUM_HEADS:-10}
 ENSEMBLE_PRM_PRIOR_SCALE=${ENSEMBLE_PRM_PRIOR_SCALE:-10}
 BELIEF_BETA_KL=${BELIEF_BETA_KL:-0.05}
+BAYESIAN_BETA2_GRID=${BAYESIAN_BETA2_GRID:-"0.05,0.1,0.2,0.3,0.5,1.0"}
 
 # BayesianPRM eval-time conservatism.
 # auto: use checkpoint config.
 BELIEF_USE_CONSERVATISM=${BELIEF_USE_CONSERVATISM:-auto}
 
 # Empty: use checkpoint config.
-BELIEF_CONSERVATISM_BETA=${BELIEF_CONSERVATISM_BETA:-0.01}
+BELIEF_CONSERVATISM_BETA=${BELIEF_CONSERVATISM_BETA:-}
 
 # Optional explicit checkpoints:
 BETA_CKPT=${BETA_CKPT:-}
@@ -402,6 +403,12 @@ run_one() {
     --repeats "${TTS_REPEATS}"
     --seed "${TTS_SEED}"
   )
+
+  if [ "${MODE}" = "bayesian" ]; then
+    TTS_ARGS+=(
+      --bayesian-beta2-grid "${BAYESIAN_BETA2_GRID}"
+    )
+  fi
 
   if is_true "${TTS_ENABLE_IAS}"; then
     case "${MODE}" in

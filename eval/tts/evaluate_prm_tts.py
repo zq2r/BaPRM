@@ -288,8 +288,9 @@ def bayesian_step_reward(
         )
 
     # alpha_final_m ∝ alpha_rel_m * exp(-mu_m / beta2)
+    temperature = max(beta2, 1e-6)
     log_weights = [
-        math.log(max(alpha, 1e-30))
+        math.log(max(alpha, 1e-6))
         - mu / beta2
         for mu, alpha in zip(mus, rels)
     ]
