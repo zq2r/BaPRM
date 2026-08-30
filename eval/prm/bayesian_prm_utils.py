@@ -103,8 +103,10 @@ def batch_prm_weighted_mu(
 
         if return_details:
             return {
-                "mu_rel": empty,
-                "mu_final": empty,
+                "mu_heads": mu_heads,
+                "rel_weights": rel_weights,
+                "mu_rel": mu_rel,
+                "mu_final": mu_final,
             }
 
         return empty

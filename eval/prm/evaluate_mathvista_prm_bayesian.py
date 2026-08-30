@@ -230,12 +230,14 @@ def evaluate_chat_model():
 
             prm_scores_flattened = []
             prm_mu_flattened = []
+            prm_mu_heads_flattened = []
+            prm_rel_weights_flattened = []
             for i in range(0, len(prompts), args.mini_batch_size):
                 curr_bs = min(args.mini_batch_size, len(prompts) - i)
                 curr_pixel_values = torch.cat([pixel_values] * curr_bs, dim=0)
                 curr_questions = prompts[i : i + curr_bs]
                 curr_num_patches = [pixel_values.shape[0]] * curr_bs
-                mu = batch_prm_mu(
+                details = batch_prm_mu(
                     model=model,
                     tokenizer=tokenizer,
                     pixel_values=curr_pixel_values,
@@ -244,12 +246,19 @@ def evaluate_chat_model():
                     verbose=False,
                     belief_use_conservatism=args.belief_use_conservatism,
                     belief_conservatism_beta=args.belief_conservatism_beta,
+                    return_details=True,
                 )
+
+                mu_heads = details["mu_heads"]
+                rel_weights = details["rel_weights"]
+                mu = details["mu_final"]
 
                 score = mu
 
                 prm_scores_flattened.extend(score.tolist())
                 prm_mu_flattened.extend(mu.tolist())
+                prm_mu_heads_flattened.extend(mu_heads.tolist())
+                prm_rel_weights_flattened.extend(rel_weights.tolist())
 
             data_item['prm_scores'] = []
 
@@ -258,7 +267,7 @@ def evaluate_chat_model():
             question = _pick_question_text(data_item)
             ias_prompt = f'Question: {question}\nProcess: <prm>'
 
-            ias_mu = batch_prm_mu(
+            ias_details = batch_prm_mu(
                 model=model,
                 tokenizer=tokenizer,
                 pixel_values=pixel_values,
@@ -267,7 +276,13 @@ def evaluate_chat_model():
                 verbose=False,
                 belief_use_conservatism=args.belief_use_conservatism,
                 belief_conservatism_beta=args.belief_conservatism_beta,
+                return_details=True,
             )
+
+            ias_mu = ias_details["mu_final"]
+            ias_mu_rel = ias_details["mu_rel"]
+            ias_mu_heads = ias_details["mu_heads"]
+            ias_rel_weights = ias_details["rel_weights"]
 
             if ias_mu.numel() != 1:
                 raise RuntimeError(
@@ -275,9 +290,20 @@ def evaluate_chat_model():
                     f'but got {ias_mu.numel()}.'
                 )
 
+            if ias_mu_heads.shape[0] != 1 or ias_rel_weights.shape[0] != 1:
+                raise RuntimeError(
+                    'IAS question-only scoring should return exactly one '
+                    'head/reliability vector.'
+                )
+
             data_item['ias_mu'] = float(ias_mu.item())
+            data_item['ias_mu_rel'] = float(ias_mu_rel.item())
+            data_item['ias_mu_heads'] = ias_mu_heads[0].tolist()
+            data_item['ias_rel_weights'] = ias_rel_weights[0].tolist()
 
             data_item['prm_mu'] = []
+            data_item['prm_mu_heads'] = []
+            data_item['prm_rel_weights'] = []
             curr_len = 0
             for i in range(len(steps_lens)):
                 data_item['prm_scores'].append(
@@ -285,6 +311,17 @@ def evaluate_chat_model():
                 )
                 data_item['prm_mu'].append(
                     prm_mu_flattened[curr_len : curr_len + steps_lens[i]]
+                )
+                data_item['prm_mu_heads'].append(
+                    prm_mu_heads_flattened[
+                        curr_len : curr_len + steps_lens[i]
+                    ]
+                )
+
+                data_item['prm_rel_weights'].append(
+                    prm_rel_weights_flattened[
+                        curr_len : curr_len + steps_lens[i]
+                    ]
                 )
                 curr_len += steps_lens[i]
 

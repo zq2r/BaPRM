@@ -21,7 +21,7 @@ model_name=${model_name:-"InternVL3-8B"}
 
 # Can specify one or multiple:
 # beta normal ensemble bayesian
-PRM_MODES=${PRM_MODES:-"normal beta"}
+PRM_MODES=${PRM_MODES:-"bayesian"}
 
 # Can specify one or multiple:
 # MathVision MathVerse MathVista MMStar
@@ -53,10 +53,18 @@ MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-1}
 NUM_WORKERS=${NUM_WORKERS:-0}
 
 # BayesianPRM settings.
-BAYESIAN_FROM_PRIOR_ENSEMBLE=${BAYESIAN_FROM_PRIOR_ENSEMBLE:-1}
+# BayesianPRM checkpoint selector.
+ENSEMBLE_PRM_USE_PRIOR_NETWORK=${ENSEMBLE_PRM_USE_PRIOR_NETWORK:-True}
+ENSEMBLE_PRM_NUM_HEADS=${ENSEMBLE_PRM_NUM_HEADS:-10}
+ENSEMBLE_PRM_PRIOR_SCALE=${ENSEMBLE_PRM_PRIOR_SCALE:-10}
+BELIEF_BETA_KL=${BELIEF_BETA_KL:-0.05}
 
+# BayesianPRM eval-time conservatism.
+# auto: use checkpoint config.
 BELIEF_USE_CONSERVATISM=${BELIEF_USE_CONSERVATISM:-auto}
-BELIEF_CONSERVATISM_BETA=${BELIEF_CONSERVATISM_BETA:-}
+
+# Empty: use checkpoint config.
+BELIEF_CONSERVATISM_BETA=${BELIEF_CONSERVATISM_BETA:-0.01}
 
 # Optional explicit checkpoints:
 BETA_CKPT=${BETA_CKPT:-}
@@ -111,10 +119,10 @@ resolve_mode() {
     bayesian)
       SCRIPT_SUFFIX="bayesian"
 
-      if is_true "${BAYESIAN_FROM_PRIOR_ENSEMBLE}"; then
-        CKPT_ROOT="${REPO_ROOT}/log/bayesian-prior-${model_name}-visualprm400k"
+      if is_true "${ENSEMBLE_PRM_USE_PRIOR_NETWORK}"; then
+        CKPT_ROOT="${REPO_ROOT}/log/bayesian-prior-head${ENSEMBLE_PRM_NUM_HEADS}-scale${ENSEMBLE_PRM_PRIOR_SCALE}-beta${BELIEF_BETA_KL}-${model_name}-visualprm400k"
       else
-        CKPT_ROOT="${REPO_ROOT}/log/bayesian-${model_name}-visualprm400k"
+        CKPT_ROOT="${REPO_ROOT}/log/bayesian-head${ENSEMBLE_PRM_NUM_HEADS}-scale${ENSEMBLE_PRM_PRIOR_SCALE}-beta${BELIEF_BETA_KL}-${model_name}-visualprm400k"
       fi
 
       CKPT="${BAYESIAN_CKPT}"
