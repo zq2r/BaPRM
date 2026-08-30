@@ -59,8 +59,14 @@ def batch_prm_weighted_mu(
             question = "<image>\n" + question
 
         template = get_conv_template(model.template)
-        template.append_message(template.roles[0], "<image>\n" + question)
-        template.append_message(template.roles[1], None)
+        template.append_message(
+            template.roles[0],
+            "",
+        )
+        template.append_message(
+            template.roles[1],
+            question,
+        )
         query = template.get_prompt()
 
         image_tokens = (
