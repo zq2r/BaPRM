@@ -70,10 +70,45 @@ def validate_data(
                     f"item {i}: prm_sigma < max N={max_n}"
                 )
 
+        if prm_mode == "bayesian":
+            if len(
+                item.get("prm_mu_heads", [])
+            ) < max_n:
+                raise ValueError(
+                    f"item {i}: prm_mu_heads < max N={max_n}"
+                )
+
+            if len(
+                item.get("prm_rel_weights", [])
+            ) < max_n:
+                raise ValueError(
+                    f"item {i}: prm_rel_weights < max N={max_n}"
+                )
+
         if require_ias:
             if "ias_mu" not in item:
                 raise ValueError(
                     f"item {i}: missing ias_mu required by IAS"
+                )
+        if require_ias and prm_mode == "bayesian":
+            if "ias_mu_heads" not in item:
+                raise ValueError(
+                    f"item {i}: missing ias_mu_heads "
+                    "required by Bayesian IAS"
+                )
+
+            if "ias_rel_weights" not in item:
+                raise ValueError(
+                    f"item {i}: missing ias_rel_weights "
+                    "required by Bayesian IAS"
+                )
+
+            if len(item["ias_mu_heads"]) != len(
+                item["ias_rel_weights"]
+            ):
+                raise ValueError(
+                    f"item {i}: IAS Bayesian head/reliability "
+                    "dimensions do not match"
                 )
 
             p = float(item["ias_mu"])
@@ -208,6 +243,270 @@ def evaluate_standard_prm(
 
     return correct / len(data), correct
 
+def bayesian_step_reward(
+    mu_heads,
+    rel_weights,
+    beta2,
+):
+    beta2 = float(beta2)
+
+    if beta2 <= 0.0:
+        raise ValueError(
+            f"Bayesian beta2 must be > 0, got {beta2}"
+        )
+
+    if len(mu_heads) != len(rel_weights):
+        raise ValueError(
+            "mu_heads and rel_weights have different lengths: "
+            f"{len(mu_heads)} vs {len(rel_weights)}"
+        )
+
+    if not mu_heads:
+        raise ValueError(
+            "Empty Bayesian ensemble vector."
+        )
+
+    mus = [float(x) for x in mu_heads]
+    rels = [float(x) for x in rel_weights]
+
+    if any(not math.isfinite(x) for x in mus):
+        raise ValueError(
+            f"Non-finite Bayesian head rewards: {mus}"
+        )
+
+    if any(
+        (not math.isfinite(x)) or x < 0.0
+        for x in rels
+    ):
+        raise ValueError(
+            f"Invalid reliability weights: {rels}"
+        )
+
+    if sum(rels) <= 0.0:
+        raise ValueError(
+            "Reliability weights sum to zero."
+        )
+
+    # alpha_final_m ∝ alpha_rel_m * exp(-mu_m / beta2)
+    log_weights = [
+        math.log(max(alpha, 1e-30))
+        - mu / beta2
+        for mu, alpha in zip(mus, rels)
+    ]
+
+    # Numerically stable softmax.
+    max_log_weight = max(log_weights)
+
+    exp_weights = [
+        math.exp(x - max_log_weight)
+        for x in log_weights
+    ]
+
+    normalizer = sum(exp_weights)
+
+    post_weights = [
+        x / normalizer
+        for x in exp_weights
+    ]
+
+    return sum(
+        w * mu
+        for w, mu in zip(post_weights, mus)
+    )
+
+
+def bayesian_trajectory_score(
+    mu_head_steps,
+    rel_weight_steps,
+    beta2,
+):
+    if len(mu_head_steps) != len(rel_weight_steps):
+        raise ValueError(
+            "Bayesian trajectory has mismatched "
+            "mu-head/reliability step counts."
+        )
+
+    if not mu_head_steps:
+        return -1e9
+
+    step_rewards = [
+        bayesian_step_reward(
+            mu_heads,
+            rel_weights,
+            beta2,
+        )
+        for mu_heads, rel_weights in zip(
+            mu_head_steps,
+            rel_weight_steps,
+        )
+    ]
+
+    # Same trajectory aggregation as standard PRM:
+    # average reward over reasoning steps.
+    return aggregate_prm(step_rewards)
+
+
+def evaluate_bayesian_setting(
+    data,
+    perms,
+    budgets,
+    beta2,
+):
+    correct = 0
+
+    for item, perm, n in zip(
+        data,
+        perms,
+        budgets,
+    ):
+        ids = perm[:n]
+
+        scores = [
+            bayesian_trajectory_score(
+                item["prm_mu_heads"][i],
+                item["prm_rel_weights"][i],
+                beta2,
+            )
+            for i in ids
+        ]
+
+        local_best = max(
+            range(len(scores)),
+            key=lambda j: scores[j],
+        )
+
+        selected_idx = ids[local_best]
+
+        correct += int(
+            int(item["labels"][selected_idx]) == 1
+        )
+
+    return correct / len(data), correct
+
+
+def evaluate_bayesian(
+    data,
+    perms,
+    budgets,
+    beta2s,
+):
+    sweep = []
+
+    for beta2 in beta2s:
+        acc, correct = evaluate_bayesian_setting(
+            data=data,
+            perms=perms,
+            budgets=budgets,
+            beta2=beta2,
+        )
+
+        sweep.append(
+            {
+                "beta2": beta2,
+                "accuracy": acc,
+                "correct": correct,
+                "total": len(data),
+            }
+        )
+
+    best = max(
+        sweep,
+        key=lambda x: x["accuracy"],
+    )
+
+    return best, sweep
+
+
+def build_bayesian_ias_budgets(
+    data,
+    beta2,
+    confidence,
+    max_n,
+):
+    probs = [
+        bayesian_step_reward(
+            item["ias_mu_heads"],
+            item["ias_rel_weights"],
+            beta2,
+        )
+        for item in data
+    ]
+
+    budgets = [
+        compute_ias_budget(
+            p,
+            confidence=confidence,
+            max_n=max_n,
+        )
+        for p in probs
+    ]
+
+    return budgets, probs
+
+
+def evaluate_bayesian_ias(
+    data,
+    perms,
+    beta2s,
+    confidence,
+    max_n,
+):
+    sweep = []
+
+    for beta2 in beta2s:
+        budgets, probs = (
+            build_bayesian_ias_budgets(
+                data=data,
+                beta2=beta2,
+                confidence=confidence,
+                max_n=max_n,
+            )
+        )
+
+        acc, correct = evaluate_bayesian_setting(
+            data=data,
+            perms=perms,
+            budgets=budgets,
+            beta2=beta2,
+        )
+
+        oracle_acc, oracle_correct = (
+            evaluate_oracle(
+                data,
+                perms,
+                budgets,
+            )
+        )
+
+        average_n = safe_mean(budgets)
+
+        histogram = {
+            str(n): budgets.count(n)
+            for n in range(1, max_n + 1)
+            if budgets.count(n) > 0
+        }
+
+        sweep.append(
+            {
+                "beta2": beta2,
+                "accuracy": acc,
+                "correct": correct,
+                "total": len(data),
+                "oracle_accuracy": oracle_acc,
+                "oracle_correct": oracle_correct,
+                "average_n": average_n,
+                "budget_ratio": average_n / max_n,
+                "budget_histogram": histogram,
+                "ias_prob_mean": safe_mean(probs),
+            }
+        )
+
+    best = max(
+        sweep,
+        key=lambda x: x["accuracy"],
+    )
+
+    return best, sweep
 
 def collect_beta_sigmas(
     data,
@@ -332,6 +631,8 @@ def main():
         required=True,
     )
 
+
+
     parser.add_argument(
         "--output-json",
         required=True,
@@ -398,12 +699,36 @@ def main():
         "--budget-q-grid",
         default="0.7,0.8,0.9",
     )
+    
+    parser.add_argument(
+        "--bayesian-beta2-grid",
+        default="0.05,0.1,0.2,0.3,0.5,1.0",
+        help=(
+            "Comma-separated beta2 grid for BayesianPRM "
+            "inference-time conservatism sweep."
+        ),
+    )
 
     args = parser.parse_args()
 
     ns = parse_int_grid(args.n_grid)
     lambdas = parse_float_grid(args.lambdas)
     qs = parse_float_grid(args.budget_q_grid)
+    beta2s = parse_float_grid(
+        args.bayesian_beta2_grid
+    )
+
+    if args.prm_mode == "bayesian":
+        if not beta2s:
+            raise ValueError(
+                "bayesian-beta2-grid must not be empty"
+            )
+
+        if any(beta2 <= 0.0 for beta2 in beta2s):
+            raise ValueError(
+                "Every Bayesian beta2 must be > 0, got "
+                f"{beta2s}"
+            )
 
     if not ns:
         raise ValueError("n-grid must not be empty")
@@ -508,6 +833,25 @@ def main():
                     "best": best,
                     "risk_budget_sweep": sweep,
                 }
+                
+            elif args.prm_mode == "bayesian":
+                best, sweep = evaluate_bayesian(
+                    data=data,
+                    perms=perms,
+                    budgets=budgets,
+                    beta2s=beta2s,
+                )
+
+                repeat_result = {
+                    "repeat": r,
+                    "accuracy": best["accuracy"],
+                    "correct": best["correct"],
+                    "total": len(data),
+                    "oracle_accuracy": oracle_acc,
+                    "oracle_correct": oracle_correct,
+                    "best": best,
+                    "beta2_sweep": sweep,
+                }
 
             else:
                 acc, correct = evaluate_standard_prm(
@@ -568,6 +912,29 @@ def main():
                 f"lambda={configs[0]['lambda']} "
                 f"tau={configs[0]['tau']:.6f}"
             )
+
+        elif args.prm_mode == "bayesian" and n > 1:
+            configs = [
+                x["best"]
+                for x in repeat_results
+            ]
+
+            output["results"][str(n)][
+                "best_beta2_first_repeat"
+            ] = configs[0]["beta2"]
+
+            output["results"][str(n)][
+                "beta2_grid"
+            ] = beta2s
+
+            print(
+                f"N={n:<2d} "
+                f"acc={acc_mean:.4f} ± {acc_std:.4f} "
+                f"oracle={oracle_mean:.4f} "
+                f"best(first repeat): "
+                f"beta2={configs[0]['beta2']}"
+            )
+
         else:
             print(
                 f"N={n:<2d} "
@@ -576,11 +943,16 @@ def main():
             )
 
     if args.ias:
-        ias_budgets = build_ias_budgets(
-            data=data,
-            confidence=args.ias_confidence,
-            max_n=ias_max_n,
-        )
+        # Normal/Beta use the evaluator-produced ias_mu directly.
+        # Bayesian recomputes ias_mu for every beta2.
+        if args.prm_mode != "bayesian":
+            ias_budgets = build_ias_budgets(
+                data=data,
+                confidence=args.ias_confidence,
+                max_n=ias_max_n,
+            )
+        else:
+            ias_budgets = None
 
         ias_repeat_results = []
 
@@ -593,19 +965,13 @@ def main():
                 subset_mode=args.subset_mode,
             )
 
-            oracle_acc, oracle_correct = evaluate_oracle(
-                data,
-                perms,
-                ias_budgets,
-            )
-
-            if args.prm_mode == "beta":
-                best, sweep = evaluate_beta(
+            if args.prm_mode == "bayesian":
+                best, sweep = evaluate_bayesian_ias(
                     data=data,
                     perms=perms,
-                    budgets=ias_budgets,
-                    lambdas=lambdas,
-                    qs=qs,
+                    beta2s=beta2s,
+                    confidence=args.ias_confidence,
+                    max_n=ias_max_n,
                 )
 
                 repeat_result = {
@@ -613,29 +979,71 @@ def main():
                     "accuracy": best["accuracy"],
                     "correct": best["correct"],
                     "total": len(data),
-                    "oracle_accuracy": oracle_acc,
-                    "oracle_correct": oracle_correct,
+                    "oracle_accuracy": best[
+                        "oracle_accuracy"
+                    ],
+                    "oracle_correct": best[
+                        "oracle_correct"
+                    ],
+                    "average_n": best["average_n"],
+                    "budget_ratio": best[
+                        "budget_ratio"
+                    ],
+                    "budget_histogram": best[
+                        "budget_histogram"
+                    ],
                     "best": best,
-                    "risk_budget_sweep": sweep,
+                    "beta2_sweep": sweep,
                 }
 
             else:
-                acc, correct = evaluate_standard_prm(
-                    data,
-                    perms,
-                    ias_budgets,
+                oracle_acc, oracle_correct = (
+                    evaluate_oracle(
+                        data,
+                        perms,
+                        ias_budgets,
+                    )
                 )
 
-                repeat_result = {
-                    "repeat": r,
-                    "accuracy": acc,
-                    "correct": correct,
-                    "total": len(data),
-                    "oracle_accuracy": oracle_acc,
-                    "oracle_correct": oracle_correct,
-                }
+                if args.prm_mode == "beta":
+                    best, sweep = evaluate_beta(
+                        data=data,
+                        perms=perms,
+                        budgets=ias_budgets,
+                        lambdas=lambdas,
+                        qs=qs,
+                    )
 
-            ias_repeat_results.append(repeat_result)
+                    repeat_result = {
+                        "repeat": r,
+                        "accuracy": best["accuracy"],
+                        "correct": best["correct"],
+                        "total": len(data),
+                        "oracle_accuracy": oracle_acc,
+                        "oracle_correct": oracle_correct,
+                        "best": best,
+                        "risk_budget_sweep": sweep,
+                    }
+
+                else:
+                    acc, correct = evaluate_standard_prm(
+                        data,
+                        perms,
+                        ias_budgets,
+                    )
+
+                    repeat_result = {
+                        "repeat": r,
+                        "accuracy": acc,
+                        "correct": correct,
+                        "total": len(data),
+                        "oracle_accuracy": oracle_acc,
+                        "oracle_correct": oracle_correct,
+                    }
+
+            ias_repeat_results.append(
+                repeat_result
+            )
 
         ias_accs = [
             x["accuracy"]
@@ -647,24 +1055,55 @@ def main():
             for x in ias_repeat_results
         ]
 
-        ias_acc_mean, ias_acc_std = mean_std(ias_accs)
+        ias_acc_mean, ias_acc_std = mean_std(
+            ias_accs
+        )
+
         ias_oracle_mean, ias_oracle_std = mean_std(
             ias_oracle_accs
         )
 
-        average_n = safe_mean(ias_budgets)
+        if args.prm_mode == "bayesian":
+            average_n = safe_mean(
+                [
+                    x["average_n"]
+                    for x in ias_repeat_results
+                ]
+            )
 
-        histogram = {
-            str(n): ias_budgets.count(n)
-            for n in range(1, ias_max_n + 1)
-            if ias_budgets.count(n) > 0
-        }
+            # The selected beta2 can differ across repeats,
+            # matching the current BetaPRM best-per-repeat protocol.
+            histogram = ias_repeat_results[0][
+                "budget_histogram"
+            ]
+
+            best_beta2_first_repeat = (
+                ias_repeat_results[0]["best"]["beta2"]
+            )
+
+        else:
+            average_n = safe_mean(
+                ias_budgets
+            )
+
+            histogram = {
+                str(n): ias_budgets.count(n)
+                for n in range(
+                    1,
+                    ias_max_n + 1,
+                )
+                if ias_budgets.count(n) > 0
+            }
+
+            best_beta2_first_repeat = None
 
         output["ias"] = {
             "confidence": args.ias_confidence,
             "max_n": ias_max_n,
             "average_n": average_n,
-            "budget_ratio": average_n / ias_max_n,
+            "budget_ratio": (
+                average_n / ias_max_n
+            ),
             "budget_histogram": histogram,
             "accuracy_mean": ias_acc_mean,
             "accuracy_std": ias_acc_std,
@@ -673,15 +1112,41 @@ def main():
             "repeat_results": ias_repeat_results,
         }
 
-        print(
-            f"IAS    "
-            f"C={args.ias_confidence:.4f} "
-            f"Nmax={ias_max_n} "
-            f"avgN={average_n:.3f} "
-            f"budget={average_n / ias_max_n:.4f} "
-            f"acc={ias_acc_mean:.4f} ± {ias_acc_std:.4f} "
-            f"oracle={ias_oracle_mean:.4f}"
-        )
+        if args.prm_mode == "bayesian":
+            output["ias"][
+                "best_beta2_first_repeat"
+            ] = best_beta2_first_repeat
+
+            output["ias"][
+                "beta2_grid"
+            ] = beta2s
+
+            print(
+                f"IAS    "
+                f"C={args.ias_confidence:.4f} "
+                f"Nmax={ias_max_n} "
+                f"avgN={average_n:.3f} "
+                f"budget="
+                f"{average_n / ias_max_n:.4f} "
+                f"acc={ias_acc_mean:.4f} "
+                f"± {ias_acc_std:.4f} "
+                f"oracle={ias_oracle_mean:.4f} "
+                f"best(first repeat): "
+                f"beta2={best_beta2_first_repeat}"
+            )
+
+        else:
+            print(
+                f"IAS    "
+                f"C={args.ias_confidence:.4f} "
+                f"Nmax={ias_max_n} "
+                f"avgN={average_n:.3f} "
+                f"budget="
+                f"{average_n / ias_max_n:.4f} "
+                f"acc={ias_acc_mean:.4f} "
+                f"± {ias_acc_std:.4f} "
+                f"oracle={ias_oracle_mean:.4f}"
+            )
 
     out = Path(args.output_json)
     out.parent.mkdir(
