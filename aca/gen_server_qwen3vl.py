@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import os
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+
 import argparse
 from typing import List, Optional, Union
 
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 import uvicorn
+
 
 from gen_core_qwen3vl import (
     GenResult,
@@ -321,7 +325,7 @@ def main():
 
     parser.add_argument(
         "--model",
-        required=True,
+        default="/inspire/hdd/global_user/zhouzhixiang-240107010008/qzj/model/Qwen3-VL-8B-Instruct",
         help="Local Qwen3-VL model path",
     )
 

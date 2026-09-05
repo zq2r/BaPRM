@@ -339,7 +339,24 @@ class Qwen3VLGenerator:
 
         if self._special_re is not None:
             resp = re.sub(self._special_re, "", resp)
+                    
+        answer_match = re.search(
+            r"<answer>(.*?)</answer>",
+            resp,
+            re.DOTALL,
+        )
+        if "<step>" in resp or "<answer>" in resp:
+            if (
+                answer_match is None
+                or not _normalize_text(answer_match.group(1))
+            ):
+                return []
 
+        matches = re.findall(
+            self._step_answer_pattern,
+            resp,
+        )
+            
         matches = re.findall(
             self._step_answer_pattern,
             resp,

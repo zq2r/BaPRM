@@ -18,7 +18,7 @@ TP_SIZE=${TP_SIZE:-4}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-4096}
 
 # Use 2 GPUs for Qwen2.5-32B judge by default.
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3"}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"1,2,3,4"}
 
 python data_pipeline/start_vllm_server.py \
   --model "${JUDGE_MODEL}" \
