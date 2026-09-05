@@ -27,10 +27,13 @@ PRM_MODES=${PRM_MODES:-"bayesian"}
 # MathVision MathVerse MathVista MMStar
 benchs=${benchs:-"MathVision MathVerse MathVista MMStar"}
 
-GPUS=${GPUS:-4}
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"4,5,6,7"}
+# Final-paper TTS evaluation data.
+TTS_DATA_ROOT=${TTS_DATA_ROOT:-"${REPO_ROOT}/datasets/TTS_FINAL"}
 
-MASTER_PORT=${MASTER_PORT:-63810}
+GPUS=${GPUS:-4}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1,2,3"}
+
+MASTER_PORT=${MASTER_PORT:-63812}
 
 N_GRID=${N_GRID:-"1,2,4,8,16"}
 
@@ -47,7 +50,7 @@ TTS_IAS_MAX_N=${TTS_IAS_MAX_N:-16}
 
 # 1 = reuse OUT_DIR/prm_output.json when it exists.
 # 0 = rerun PRM inference and overwrite fixed outputs.
-REUSE_RAW=${REUSE_RAW:-0}
+REUSE_RAW=${REUSE_RAW:-1}
 
 MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-1}
 NUM_WORKERS=${NUM_WORKERS:-0}
@@ -57,8 +60,8 @@ NUM_WORKERS=${NUM_WORKERS:-0}
 ENSEMBLE_PRM_USE_PRIOR_NETWORK=${ENSEMBLE_PRM_USE_PRIOR_NETWORK:-True}
 ENSEMBLE_PRM_NUM_HEADS=${ENSEMBLE_PRM_NUM_HEADS:-10}
 ENSEMBLE_PRM_PRIOR_SCALE=${ENSEMBLE_PRM_PRIOR_SCALE:-10}
-BELIEF_BETA_KL=${BELIEF_BETA_KL:-0.05}
-BAYESIAN_BETA2_GRID=${BAYESIAN_BETA2_GRID:-"0.05,0.1,0.2,0.3,0.5,1.0"}
+BELIEF_BETA_KL=${BELIEF_BETA_KL:-0.1}
+BAYESIAN_BETA2_GRID=${BAYESIAN_BETA2_GRID:-"0.001,0.01,0.05,0.1,0.2,0.3,0.4,0.5,1.0"}
 
 # BayesianPRM eval-time conservatism.
 # auto: use checkpoint config.
@@ -156,21 +159,24 @@ resolve_benchmark() {
       EVAL_SCRIPT="eval/prm/evaluate_mathvision_prm_${SCRIPT_SUFFIX}.py"
       DATASET_NAME="mathvision_prm"
       ROOT_THIS="datasets/MathVision/extracted_images"
-      ANNOTATION_THIS="datasets/TTS/MathVision/rollout_annotation_internvl3_8b_n16.json"
+      ANNOTATION_THIS="${TTS_DATA_ROOT}/MathVision/rollout_annotation_internvl3_8b_n16.json"
+      EXPECTED_ITEMS=304
       ;;
 
     MathVerse)
       EVAL_SCRIPT="eval/prm/evaluate_mathverse_prm_${SCRIPT_SUFFIX}.py"
       DATASET_NAME="mathverse_prm"
       ROOT_THIS="datasets/MathVerse/extracted_images"
-      ANNOTATION_THIS="datasets/TTS/MathVerse/rollout_annotation_internvl3_8b_n16.json"
+      ANNOTATION_THIS="${TTS_DATA_ROOT}/MathVerse/rollout_annotation_internvl3_8b_n16.json"
+      EXPECTED_ITEMS=788
       ;;
 
     MathVista)
       EVAL_SCRIPT="eval/prm/evaluate_mathvista_prm_${SCRIPT_SUFFIX}.py"
       DATASET_NAME="mathvista_prm"
       ROOT_THIS="datasets/MathVista/extracted_images"
-      ANNOTATION_THIS="datasets/TTS/MathVista/rollout_annotation_internvl3_8b_n16.json"
+      ANNOTATION_THIS="${TTS_DATA_ROOT}/MathVista/rollout_annotation_internvl3_8b_n16.json"
+      EXPECTED_ITEMS=1000
       ;;
 
     MMStar)
@@ -179,7 +185,8 @@ resolve_benchmark() {
       EVAL_SCRIPT="eval/prm/evaluate_mathvision_prm_${SCRIPT_SUFFIX}.py"
       DATASET_NAME="mathvision_prm"
       ROOT_THIS="datasets/MMStar"
-      ANNOTATION_THIS="datasets/TTS/MMStar/rollout_annotation_internvl3_8b_n16.json"
+      ANNOTATION_THIS="${TTS_DATA_ROOT}/MMStar/rollout_annotation_internvl3_8b_n16.json"
+      EXPECTED_ITEMS=1500
       ;;
 
     *)
@@ -204,35 +211,52 @@ resolve_benchmark() {
 
 validate_rollout_annotation() {
   local ANNOTATION_PATH="$1"
+  local EXPECTED_ITEMS_THIS="$2"
 
-  ANNOTATION_PATH="${ANNOTATION_PATH}" python - <<'PY2'
+  ANNOTATION_PATH="${ANNOTATION_PATH}" \
+  EXPECTED_ITEMS="${EXPECTED_ITEMS_THIS}" \
+  python - <<'PY2'
 import json
 import os
 import sys
 
 path = os.environ["ANNOTATION_PATH"]
+expected_items = int(os.environ["EXPECTED_ITEMS"])
 
 with open(path, "r", encoding="utf-8") as f:
     data = json.load(f)
 
+if len(data) != expected_items:
+    print(
+        f"ERROR: wrong number of questions in {path}: "
+        f"got {len(data)}, expected {expected_items}"
+    )
+    sys.exit(1)
+
 bad = []
+
 for i, item in enumerate(data):
     n_solution = len(item.get("solutions_splits", []))
     n_label = len(item.get("labels", []))
+
     if n_solution != 16 or n_label != 16:
         bad.append((i, n_solution, n_label))
 
 if bad:
     print(f"ERROR: incomplete rollout pool: {path}")
     print(f"bad items: {len(bad)}")
+
     for i, n_solution, n_label in bad[:50]:
         print(
-            f"  item={i}: solutions_splits={n_solution}, labels={n_label}"
+            f"  item={i}: "
+            f"solutions_splits={n_solution}, "
+            f"labels={n_label}"
         )
+
     sys.exit(1)
 
 print(
-    f"[rollout check] PASS: {len(data)} items, "
+    f"[rollout check] PASS: {len(data)}/{expected_items} items, "
     f"all have exactly 16 candidates."
 )
 PY2
@@ -284,7 +308,7 @@ run_one() {
 
   resolve_mode "${MODE}"
   resolve_benchmark "${BENCH}"
-  validate_rollout_annotation "${ANNOTATION_THIS}"
+  validate_rollout_annotation "${ANNOTATION_THIS}" "${EXPECTED_ITEMS}"
 
   EXTRA_ARGS=()
 
@@ -353,7 +377,7 @@ run_one() {
     # Fixed files prm_output.json / prm_score.json / tts_results.json are unaffected.
     rm -f "${OUT_DIR}/${DATASET_NAME}_"*.json 2>/dev/null || true
 
-    torchrun \
+    python -m torch.distributed.run \
       --nnodes=1 \
       --node_rank=0 \
       --master_addr=127.0.0.1 \
@@ -451,7 +475,6 @@ done
 # ============================================================
 # Final summary
 # ============================================================
-
 # No timestamp. Different mode/benchmark combinations get different summary folders.
 SUMMARY_TAG="$(printf '%s__%s' "${PRM_MODES}" "${benchs}" | tr '/ ,:' '_____')"
 export SUMMARY_TAG
@@ -460,12 +483,37 @@ python - <<'PY'
 import csv
 import json
 import os
+from collections import defaultdict
 from pathlib import Path
 
 manifest = os.environ["MANIFEST"]
 summary_tag = os.environ["SUMMARY_TAG"]
 
+CANONICAL_BENCHES = [
+    "MathVision",
+    "MathVerse",
+    "MathVista",
+    "MMStar",
+]
+
+data_by_mode = defaultdict(dict)
 rows = []
+
+
+def best_beta2(result):
+    value = result.get("best_beta2_first_repeat")
+    if value is not None:
+        return float(value)
+
+    repeat_results = result.get("repeat_results", [])
+    if repeat_results:
+        best = repeat_results[0].get("best", {})
+        value = best.get("beta2")
+        if value is not None:
+            return float(value)
+
+    return None
+
 
 with open(manifest, "r", encoding="utf-8") as f:
     for line in f:
@@ -473,6 +521,8 @@ with open(manifest, "r", encoding="utf-8") as f:
 
         with open(path, "r", encoding="utf-8") as g:
             data = json.load(g)
+
+        data_by_mode[mode][bench] = data
 
         norm_max_n = (
             data.get("ias", {}).get(
@@ -491,6 +541,11 @@ with open(manifest, "r", encoding="utf-8") as f:
                 "N": str(n_int),
                 "average_n": float(n_int),
                 "budget_ratio": float(n_int) / norm_max_n,
+                "best_beta2": (
+                    best_beta2(result)
+                    if mode == "bayesian" and n_int > 1
+                    else None
+                ),
                 "accuracy_mean": result["accuracy_mean"],
                 "accuracy_std": result["accuracy_std"],
                 "oracle_pass_mean": result["oracle_pass_mean"],
@@ -507,20 +562,32 @@ with open(manifest, "r", encoding="utf-8") as f:
                 "N": "IAS",
                 "average_n": result["average_n"],
                 "budget_ratio": result["budget_ratio"],
+                "best_beta2": (
+                    best_beta2(result)
+                    if mode == "bayesian"
+                    else None
+                ),
                 "accuracy_mean": result["accuracy_mean"],
                 "accuracy_std": result["accuracy_std"],
                 "oracle_pass_mean": result["oracle_pass_mean"],
                 "oracle_pass_std": result["oracle_pass_std"],
             })
 
-rows.sort(
-    key=lambda x: (
-        x["mode"],
-        x["benchmark"],
-        0 if x["strategy"] == "fixed" else 1,
-        x["average_n"],
+
+def row_order(r):
+    if r["N"] == "IAS":
+        n_key = 10**9
+    else:
+        n_key = int(r["N"])
+
+    return (
+        r["mode"],
+        r["benchmark"],
+        n_key,
     )
-)
+
+
+rows.sort(key=row_order)
 
 out_root = Path("outputs/tts/summaries") / summary_tag
 out_root.mkdir(parents=True, exist_ok=True)
@@ -541,6 +608,7 @@ with open(csv_path, "w", encoding="utf-8", newline="") as f:
             "N",
             "average_n",
             "budget_ratio",
+            "best_beta2",
             "accuracy_mean",
             "accuracy_std",
             "oracle_pass_mean",
@@ -550,47 +618,176 @@ with open(csv_path, "w", encoding="utf-8", newline="") as f:
     writer.writeheader()
     writer.writerows(rows)
 
+
+def fmt_acc(result, mean_key, std_key):
+    return (
+        f"{100 * result[mean_key]:.2f}"
+        f" ± {100 * result[std_key]:.2f}"
+    )
+
+
+def print_matrix(title, benches, row_labels, value_fn):
+    first_width = 10
+    col_width = 23
+    total_width = first_width + col_width * len(benches)
+
+    print()
+    print("=" * total_width)
+    print(title)
+    print("-" * total_width)
+
+    print(f"{'Setting':<{first_width}s}", end="")
+    for bench in benches:
+        print(f"{bench:^{col_width}s}", end="")
+    print()
+
+    print("-" * total_width)
+
+    for label in row_labels:
+        print(f"{label:<{first_width}s}", end="")
+
+        for bench in benches:
+            value = value_fn(bench, label)
+            print(f"{value:^{col_width}s}", end="")
+
+        print()
+
+    print("=" * total_width)
+
+
+for mode, bench_data in data_by_mode.items():
+    benches = [
+        b for b in CANONICAL_BENCHES
+        if b in bench_data
+    ]
+
+    benches += [
+        b for b in bench_data
+        if b not in benches
+    ]
+
+    n_values = sorted({
+        int(n)
+        for data in bench_data.values()
+        for n in data["results"].keys()
+    })
+
+    accuracy_rows = [f"N={n}" for n in n_values]
+
+    if any("ias" in data for data in bench_data.values()):
+        accuracy_rows.append("IAS")
+
+    def accuracy_value(bench, label):
+        data = bench_data[bench]
+
+        if label == "IAS":
+            result = data.get("ias")
+        else:
+            n = label.split("=", 1)[1]
+            result = data["results"].get(n)
+
+        if result is None:
+            return "-"
+
+        return fmt_acc(
+            result,
+            "accuracy_mean",
+            "accuracy_std",
+        )
+
+    print_matrix(
+        f"{mode.upper()} — Accuracy (%)",
+        benches,
+        accuracy_rows,
+        accuracy_value,
+    )
+
+    def oracle_value(bench, label):
+        data = bench_data[bench]
+
+        if label == "IAS":
+            result = data.get("ias")
+        else:
+            n = label.split("=", 1)[1]
+            result = data["results"].get(n)
+
+        if result is None:
+            return "-"
+
+        return fmt_acc(
+            result,
+            "oracle_pass_mean",
+            "oracle_pass_std",
+        )
+
+    print_matrix(
+        f"{mode.upper()} — Oracle Pass (%)",
+        benches,
+        accuracy_rows,
+        oracle_value,
+    )
+
+    if any("ias" in data for data in bench_data.values()):
+        def ias_budget_value(bench, label):
+            result = bench_data[bench].get("ias")
+            if result is None:
+                return "-"
+
+            if label == "Avg.N":
+                return f"{result['average_n']:.3f}"
+
+            if label == "Budget":
+                return f"{100 * result['budget_ratio']:.2f}%"
+
+            raise ValueError(label)
+
+        print_matrix(
+            f"{mode.upper()} — IAS Budget",
+            benches,
+            ["Avg.N", "Budget"],
+            ias_budget_value,
+        )
+
+    if mode == "bayesian":
+        beta_rows = [
+            f"N={n}"
+            for n in n_values
+            if n > 1
+        ]
+
+        if any("ias" in data for data in bench_data.values()):
+            beta_rows.append("IAS")
+
+        def beta2_value(bench, label):
+            data = bench_data[bench]
+
+            if label == "IAS":
+                result = data.get("ias")
+            else:
+                n = label.split("=", 1)[1]
+                result = data["results"].get(n)
+
+            if result is None:
+                return "-"
+
+            value = best_beta2(result)
+            if value is None:
+                return "-"
+
+            return f"{value:.4g}"
+
+        print_matrix(
+            f"{mode.upper()} — Best beta2 (first repeat)",
+            benches,
+            beta_rows,
+            beta2_value,
+        )
+
+
 print()
-print("=" * 120)
-print(
-    f"{'Mode':10s} "
-    f"{'Benchmark':12s} "
-    f"{'Method':7s} "
-    f"{'N':>5s} "
-    f"{'Avg.N':>8s} "
-    f"{'Budget':>8s} "
-    f"{'Accuracy':>18s} "
-    f"{'Oracle pass':>18s}"
-)
-print("-" * 120)
-
-for r in rows:
-    acc = (
-        f"{100*r['accuracy_mean']:.2f}"
-        f" ± {100*r['accuracy_std']:.2f}"
-    )
-
-    oracle = (
-        f"{100*r['oracle_pass_mean']:.2f}"
-        f" ± {100*r['oracle_pass_std']:.2f}"
-    )
-
-    print(
-        f"{r['mode']:10s} "
-        f"{r['benchmark']:12s} "
-        f"{r['strategy']:7s} "
-        f"{r['N']:>5s} "
-        f"{r['average_n']:8.2f} "
-        f"{r['budget_ratio']:8.4f} "
-        f"{acc:>18s} "
-        f"{oracle:>18s}"
-    )
-
-print("=" * 120)
 print(f"JSON: {json_path}")
 print(f"CSV : {csv_path}")
 PY
-
 rm -f "${MANIFEST}"
 
 echo "All TTS evaluations finished."

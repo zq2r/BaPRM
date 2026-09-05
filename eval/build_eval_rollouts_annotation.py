@@ -351,15 +351,41 @@ def main():
                 timeout=args.timeout,
                 retries=args.retries
             )
-            if len(selected) < args.num_rollouts:
+            # Keep generating until we obtain exactly num_rollouts
+            # valid unique candidates. Do not silently save an
+            # incomplete rollout pool.
+            refill_round = 0
+            max_refill_rounds = 20
+
+            while (
+                len(selected) < args.num_rollouts
+                and refill_round < max_refill_rounds
+            ):
                 need = args.num_rollouts - len(selected)
-                more_n = max(need, int(need * args.oversample))
+
+                # Generate at least one full batch even when only
+                # one candidate is missing, since duplicates are
+                # common in these difficult cases.
+                more_n = max(
+                    args.num_rollouts,
+                    int(need * args.oversample),
+                )
+
+                logger.warning(
+                    f"Sample {idx}: only "
+                    f"{len(selected)}/{args.num_rollouts} "
+                    f"unique rollouts; refill "
+                    f"{refill_round + 1}/{max_refill_rounds}, "
+                    f"generating {more_n} more."
+                )
+
                 seg_lists_more = gen_lm.generate_results(
                     prompt,
                     image_path=image_path,
                     num_copies=more_n
                 )
                 seg_lists_all.extend(seg_lists_more)
+
                 selected = select_by_llm_quality(
                     seg_lists_all,
                     args.num_rollouts,
@@ -369,6 +395,17 @@ def main():
                     timeout=args.timeout,
                     retries=args.retries
                 )
+
+                refill_round += 1
+
+            if len(selected) != args.num_rollouts:
+                raise RuntimeError(
+                    f"Sample {idx}: failed to collect "
+                    f"{args.num_rollouts} unique rollouts after "
+                    f"{max_refill_rounds} refill rounds; "
+                    f"got {len(selected)}."
+                )
+
             seg_lists = selected
         else:
             seg_lists = select_best_rollouts(seg_lists_all, args.num_rollouts)
