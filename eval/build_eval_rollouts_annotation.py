@@ -248,12 +248,96 @@ Model's Answer:
     # 所有重试失败或无明确 yes/no 时，默认判为 0
     return 0
 
+def generate_from_server(
+    server_url,
+    question,
+    image_path,
+    n,
+    temperature,
+    top_p,
+    top_k,
+    timeout=600,
+):
+    """
+    Generate exactly n raw rollouts from an external generator server.
+
+    IMPORTANT:
+    We deliberately consume `raw` rather than `selected`.
+    Rollout quality selection remains in this script so that the
+    TTS data construction protocol is unchanged.
+    """
+    url = server_url.rstrip("/") + "/generate_from_scratch"
+
+    payload = {
+        "question": question,
+        "image_path": os.path.abspath(image_path) if image_path else None,
+        "k": int(n),
+
+        # The caller has already decided how many candidates to generate.
+        # Do not oversample again inside the server.
+        "oversample_factor": 1.0,
+
+        "sampling": {
+            "temperature": float(temperature),
+            "top_p": float(top_p),
+            "top_k": int(top_k),
+            "max_new_tokens": 2048,
+            "repetition_penalty": 1.05,
+        },
+
+        "return_raw": True,
+    }
+
+    r = requests.post(
+        url,
+        json=payload,
+        timeout=timeout,
+    )
+    r.raise_for_status()
+
+    data = r.json()
+    raw = data.get("raw")
+
+    if raw is None:
+        raise RuntimeError(
+            f"Generator server returned no raw rollouts: {data}"
+        )
+
+    seg_lists = []
+
+    for item in raw:
+        segs = item.get("segments") or []
+        segs = [
+            str(s).strip()
+            for s in segs
+            if str(s).strip()
+        ]
+        if segs:
+            seg_lists.append(segs)
+
+    return seg_lists
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True, help="原始数据 JSON：列表，每项至少含 question, correct_answer, image_path(可选)")
     parser.add_argument("--output", required=True, help="输出 annotation JSON（评测标注文件）")
     parser.add_argument("--generator_model", default="OpenGVLab/InternVL2_5-8B", help="用于生成候选推理链的本地模型")
+    parser.add_argument(
+        "--generator_server",
+        default="",
+        help=(
+            "Optional external generator server, e.g. "
+            "http://127.0.0.1:18080. "
+            "If provided, generator_model is not loaded locally."
+        ),
+    )
+
+    parser.add_argument(
+        "--generator_timeout",
+        type=int,
+        default=600,
+        help="Timeout in seconds for one generator-server request.",
+    )
     parser.add_argument("--num_rollouts", type=int, default=16)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top_p", type=float, default=0.9)
@@ -303,19 +387,43 @@ def main():
         print(f"Saved annotation to {args.output}")
         return
 
-    # 自动识别是否使用 URSA 模板（不会影响 InternVL）
+    # 自动识别是否使用 URSA 模板（local generator only）
     is_ursa = 'ursa' in str(args.generator_model).lower()
 
-    from data_pipeline.llm_utils import LanguageModel
+    gen_lm = None
 
-    # 本地生成器：直接使用 vLLM Python（不走 HTTP）
-    gen_lm = LanguageModel(
-        model=args.generator_model,
-        max_new_tokens=2048,
-        temperature=args.temperature,
-        top_k=args.top_k,
-        top_p=args.top_p,
-    )
+    if args.generator_server:
+        health_url = (
+            args.generator_server.rstrip("/")
+            + "/healthz"
+        )
+
+        try:
+            r = requests.get(
+                health_url,
+                timeout=10,
+            )
+            r.raise_for_status()
+            logger.info(
+                f"Generator server ready: {r.json()}"
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Generator server is unavailable: "
+                f"{args.generator_server}; err={e}"
+            ) from e
+
+    else:
+        from data_pipeline.llm_utils import LanguageModel
+
+        # Existing local InternVL / URSA path.
+        gen_lm = LanguageModel(
+            model=args.generator_model,
+            max_new_tokens=2048,
+            temperature=args.temperature,
+            top_k=args.top_k,
+            top_p=args.top_p,
+        )
 
     flush_every = max(1, int(args.flush_every))
 
@@ -334,12 +442,28 @@ def main():
         prompt = make_cot_prompt_ursa(q) if is_ursa else make_cot_prompt(q)
 
         # 超采样
-        first_n = max(args.num_rollouts, int(args.num_rollouts * args.oversample))
-        seg_lists_all = gen_lm.generate_results(
-            prompt,
-            image_path=image_path,
-            num_copies=first_n
+        first_n = max(
+            args.num_rollouts,
+            int(args.num_rollouts * args.oversample),
         )
+
+        if args.generator_server:
+            seg_lists_all = generate_from_server(
+                server_url=args.generator_server,
+                question=q,
+                image_path=image_path,
+                n=first_n,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                top_k=args.top_k,
+                timeout=args.generator_timeout,
+            )
+        else:
+            seg_lists_all = gen_lm.generate_results(
+                prompt,
+                image_path=image_path,
+                num_copies=first_n,
+            )
 
         if args.select_by_llm_quality:
             selected = select_by_llm_quality(
@@ -379,11 +503,23 @@ def main():
                     f"generating {more_n} more."
                 )
 
-                seg_lists_more = gen_lm.generate_results(
-                    prompt,
-                    image_path=image_path,
-                    num_copies=more_n
-                )
+                if args.generator_server:
+                    seg_lists_more = generate_from_server(
+                        server_url=args.generator_server,
+                        question=q,
+                        image_path=image_path,
+                        n=more_n,
+                        temperature=args.temperature,
+                        top_p=args.top_p,
+                        top_k=args.top_k,
+                        timeout=args.generator_timeout,
+                    )
+                else:
+                    seg_lists_more = gen_lm.generate_results(
+                        prompt,
+                        image_path=image_path,
+                        num_copies=more_n,
+                    )
                 seg_lists_all.extend(seg_lists_more)
 
                 selected = select_by_llm_quality(
