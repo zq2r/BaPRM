@@ -35,6 +35,9 @@ GENERATOR_MODEL=${GENERATOR_MODEL:-"/inspire/hdd/global_user/zhouzhixiang-240107
 GENERATOR_SERVER=${GENERATOR_SERVER:-"http://127.0.0.1:18080"}
 GENERATOR_TIMEOUT=${GENERATOR_TIMEOUT:-1200}
 
+MAX_REFILL_ROUNDS=${MAX_REFILL_ROUNDS:-0}
+ALLOW_INCOMPLETE=${ALLOW_INCOMPLETE:-1}
+
 # =========================
 # Judge
 # =========================
@@ -108,6 +111,14 @@ run_one() {
   echo "Output:         ${OUTPUT}"
   echo "============================================================"
 
+  REFILL_ARGS=(
+  --max_refill_rounds "${MAX_REFILL_ROUNDS}"
+  )
+
+  if [ "${ALLOW_INCOMPLETE}" = "1" ]; then
+    REFILL_ARGS+=(--allow_incomplete)
+  fi
+
   python -m eval.build_eval_rollouts_annotation \
     --input "${INPUT}" \
     --output "${OUTPUT}" \
@@ -123,10 +134,11 @@ run_one() {
     --oversample "${OVERSAMPLE}" \
     --timeout "${TIMEOUT}" \
     --retries "${RETRIES}" \
-    --flush_every 1
+    --flush_every 1 \
+    "${REFILL_ARGS[@]}"
 }
 
-run_one "MathVision"
+# run_one "MathVision"
 run_one "MathVerse"
 run_one "MathVista"
 run_one "MMStar"

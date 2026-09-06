@@ -221,6 +221,8 @@ class Qwen3VLGenerator:
             model=self.model_path,
             tensor_parallel_size=self.tensor_parallel_size,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
+            gpu_memory_utilization=0.80,
+            max_model_len=32768*2,
         )
 
     @staticmethod
@@ -339,24 +341,7 @@ class Qwen3VLGenerator:
 
         if self._special_re is not None:
             resp = re.sub(self._special_re, "", resp)
-                    
-        answer_match = re.search(
-            r"<answer>(.*?)</answer>",
-            resp,
-            re.DOTALL,
-        )
-        if "<step>" in resp or "<answer>" in resp:
-            if (
-                answer_match is None
-                or not _normalize_text(answer_match.group(1))
-            ):
-                return []
 
-        matches = re.findall(
-            self._step_answer_pattern,
-            resp,
-        )
-            
         matches = re.findall(
             self._step_answer_pattern,
             resp,
@@ -406,6 +391,8 @@ class Qwen3VLGenerator:
             image_path=image_path,
         )
 
+        total_n = max(1, int(n))
+
         sp_kwargs: Dict[str, Any] = {
             "temperature": float(sampling.temperature),
             "max_tokens": int(sampling.max_new_tokens),
@@ -415,7 +402,10 @@ class Qwen3VLGenerator:
                 sampling.repetition_penalty
             ),
             "skip_special_tokens": False,
-            "n": max(1, int(n)),
+
+            # Important:
+            # one completion per request, same as InternVL3.
+            "n": 1,
         }
 
         if (
@@ -424,28 +414,46 @@ class Qwen3VLGenerator:
         ):
             sp_kwargs["seed"] = int(sampling.seed)
 
-        sampling_params = SamplingParams(**sp_kwargs)
+        sampling_params = SamplingParams(
+            **sp_kwargs
+        )
+
+        # Same generation style as the existing InternVL3 path:
+        # N identical requests, each request samples one rollout.
+        inputs = [
+            inp
+            for _ in range(total_n)
+        ]
 
         outputs = self.llm.generate(
-            [inp],
+            inputs,
             sampling_params=sampling_params,
         )
 
-        if not outputs:
-            return []
-
         results: List[GenResult] = []
 
-        for out in outputs[0].outputs:
-            token_ids = getattr(out, "token_ids", []) or []
+        for request_output in outputs:
+            if not request_output.outputs:
+                continue
+
+            out = request_output.outputs[0]
+
+            token_ids = (
+                getattr(out, "token_ids", [])
+                or []
+            )
+
             raw_text = str(
-                getattr(out, "text", "") or ""
+                getattr(out, "text", "")
+                or ""
             )
 
             results.append(
                 GenResult(
-                    segments=self._parse_segments(raw_text),
-                    token_len=int(len(token_ids)),
+                    segments=self._parse_segments(
+                        raw_text
+                    ),
+                    token_len=len(token_ids),
                     raw_text=raw_text,
                 )
             )

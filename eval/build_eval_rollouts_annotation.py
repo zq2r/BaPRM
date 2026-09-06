@@ -357,6 +357,24 @@ def main():
         default="",
         help="Root directory used to resolve relative image_path/image fields. Defaults to the input file directory.",
     )
+    parser.add_argument(
+        "--max_refill_rounds",
+        type=int,
+        default=20,
+        help=(
+            "Maximum refill rounds for collecting num_rollouts "
+            "unique candidates. Set to 0 to disable refill."
+        ),
+    )
+
+    parser.add_argument(
+        "--allow_incomplete",
+        action="store_true",
+        help=(
+            "Allow saving a sample with fewer than num_rollouts "
+            "unique candidates instead of raising an error."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -479,7 +497,10 @@ def main():
             # valid unique candidates. Do not silently save an
             # incomplete rollout pool.
             refill_round = 0
-            max_refill_rounds = 20
+            max_refill_rounds = max(
+                0,
+                int(args.max_refill_rounds),
+            )
 
             while (
                 len(selected) < args.num_rollouts
@@ -535,12 +556,18 @@ def main():
                 refill_round += 1
 
             if len(selected) != args.num_rollouts:
-                raise RuntimeError(
-                    f"Sample {idx}: failed to collect "
-                    f"{args.num_rollouts} unique rollouts after "
-                    f"{max_refill_rounds} refill rounds; "
-                    f"got {len(selected)}."
+                msg = (
+                    f"Sample {idx}: collected "
+                    f"{len(selected)}/{args.num_rollouts} unique rollouts "
+                    f"after {max_refill_rounds} refill rounds."
                 )
+
+                if args.allow_incomplete:
+                    logger.warning(
+                        msg + " Saving incomplete rollout pool for later refill."
+                    )
+                else:
+                    raise RuntimeError(msg)
 
             seg_lists = selected
         else:
@@ -570,7 +597,11 @@ def main():
             "question": q,
             "query_cot": q,
             "solutions_splits": solutions_splits,
-            "labels": labels
+            "labels": labels,
+            "num_rollouts": len(solutions_splits),
+            "rollout_complete": (
+                len(solutions_splits) == args.num_rollouts
+            ),
         }
         if "id" in ex:
             item["id"] = ex["id"]

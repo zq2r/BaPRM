@@ -14,11 +14,11 @@ JUDGE_SERVED_NAME=${JUDGE_SERVED_NAME:-"Qwen2.5-32B-Instruct"}
 
 HOST=${HOST:-"127.0.0.1"}
 PORT=${PORT:-8888}
-TP_SIZE=${TP_SIZE:-4}
+TP_SIZE=${TP_SIZE:-2}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-4096}
 
 # Use 2 GPUs for Qwen2.5-32B judge by default.
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"1,2,3,4"}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0,1"}
 
 python data_pipeline/start_vllm_server.py \
   --model "${JUDGE_MODEL}" \

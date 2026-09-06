@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "2")
 
 import argparse
 from typing import List, Optional, Union
